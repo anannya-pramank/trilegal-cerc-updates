@@ -17,15 +17,35 @@ jobs:
 
       - name: Run scraper via Indian Proxy
         run: |
-          # Fetch a fresh list of free proxies, filter for an Indian (IN) one, and pick the first working exit node
-          PROXY_IP=$(curl -s "https://pubproxy.com/api/proxy?country=IN&https=true" | jq -r '.data[0].ipPort')
+          echo "Fetching bulk list of free Indian HTTP proxies..."
+          # Pull a list of Indian proxies from ProxyScrape
+          PROXY_LIST=$(curl -s "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=IN")
           
-          if [ "$PROXY_IP" != "null" ] && [ ! -z "$PROXY_IP" ]; then
-            echo "Routing through Indian proxy: $PROXY_IP"
-            export HTTPS_PROXY="http://$PROXY_IP"
-            export HTTP_PROXY="http://$PROXY_IP"
+          WORKING_PROXY=""
+          
+          # Loop through the list and test them
+          for proxy in $PROXY_LIST; do
+            # Clean up hidden carriage returns from the API response
+            proxy=$(echo "$proxy" | tr -d '\r')
+            
+            if [ -z "$proxy" ]; then continue; fi
+            
+            echo "Testing proxy: $proxy..."
+            # Try to hit CERC through the proxy with a strict 5-second timeout
+            if curl -s -k -L --max-time 5 --proxy "http://$proxy" "https://cercind.gov.in" -o /dev/null; then
+              echo "✅ Success! Found working proxy: $proxy"
+              WORKING_PROXY=$proxy
+              break
+            else
+              echo "❌ Failed or timed out."
+            fi
+          done
+          
+          if [ ! -z "$WORKING_PROXY" ]; then
+            export HTTPS_PROXY="http://$WORKING_PROXY"
+            export HTTP_PROXY="http://$WORKING_PROXY"
           else
-            echo "Warning: No free Indian proxy fetched, trying direct connection..."
+            echo "⚠️ WARNING: Exhausted the proxy list and found zero working exit nodes. The scraper will likely fail."
           fi
           
           python scrapers/cerc_scraper.py
