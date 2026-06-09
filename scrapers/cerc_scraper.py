@@ -1,6 +1,8 @@
+import ssl
 import requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime, timedelta
@@ -11,7 +13,7 @@ import os
 
 BASE_URL = "https://cercind.gov.in"
 ORDERS_URL = f"{BASE_URL}/recent_orders.html"
-LOOKBACK_DAYS = 7  # only grab orders uploaded in the last 7 days
+LOOKBACK_DAYS = 7
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -22,6 +24,20 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1"
 }
 
+class LegacyTLSAdapter(HTTPAdapter):
+    """Forces legacy TLS settings for older government servers like cercind.gov.in"""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.set_ciphers('ALL:@SECLEVEL=0')
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+SESSION = requests.Session()
+SESSION.mount('https://', LegacyTLSAdapter())
+SESSION.mount('http://',  LegacyTLSAdapter())
+
 def parse_date(date_str):
     try:
         return datetime.strptime(date_str.strip(), "%d.%m.%Y")
@@ -30,22 +46,22 @@ def parse_date(date_str):
 
 def extract_pdf_text(pdf_url):
     try:
-        r = requests.get(pdf_url, headers=HEADERS, timeout=60, verify=False)
+        r = SESSION.get(pdf_url, headers=HEADERS, timeout=60)
         r.raise_for_status()
         with pdfplumber.open(BytesIO(r.content)) as pdf:
             text = ""
-            for page in pdf.pages[:5]:   # first 5 pages only
+            for page in pdf.pages[:5]:
                 t = page.extract_text()
                 if t:
                     text += t + "\n"
-        return text[:10000]              # cap at 10k chars
+        return text[:10000]
     except Exception as e:
         print(f"  PDF error ({pdf_url}): {e}")
         return ""
 
 def scrape():
     print("Fetching CERC orders page...")
-    r = requests.get(ORDERS_URL, headers=HEADERS, timeout=30, verify=False)
+    r = SESSION.get(ORDERS_URL, headers=HEADERS, timeout=30)
     r.raise_for_status()
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -60,10 +76,9 @@ def scrape():
 
             sl_no = cells[0].get_text(strip=True)
             if not sl_no.isdigit():
-                continue                 # skip header rows
+                continue
 
-            petition_cell = cells[1]
-            petition_no   = petition_cell.get_text(strip=True)
+            petition_no   = cells[1].get_text(strip=True)
             subject       = cells[2].get_text(strip=True) if len(cells) > 2 else ""
             date_order_s  = cells[3].get_text(strip=True) if len(cells) > 3 else ""
             date_upload_s = cells[4].get_text(strip=True) if len(cells) > 4 else ""
@@ -72,11 +87,9 @@ def scrape():
             date_uploaded = parse_date(date_upload_s)
             date_of_order = parse_date(date_order_s)
 
-            # skip if outside our lookback window
             if not date_uploaded or date_uploaded < cutoff:
                 continue
 
-            # find PDF link anywhere in the row
             pdf_url = None
             for cell in cells:
                 for a in cell.find_all("a", href=True):
@@ -93,8 +106,7 @@ def scrape():
             if not pdf_url.startswith("http"):
                 pdf_url = BASE_URL + "/" + pdf_url.lstrip("/")
 
-            # stable unique ID
-            raw_id = f"{petition_no}_{date_order_s}"
+            raw_id  = f"{petition_no}_{date_order_s}"
             item_id = hashlib.md5(raw_id.encode()).hexdigest()[:16]
 
             print(f"  Processing: {petition_no}")
