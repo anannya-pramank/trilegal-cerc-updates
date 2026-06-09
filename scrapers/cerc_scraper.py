@@ -1,8 +1,4 @@
-import ssl
 import requests
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime, timedelta
@@ -11,7 +7,7 @@ from io import BytesIO
 import hashlib
 import os
 
-BASE_URL = "https://cercind.gov.in"
+BASE_URL = "http://cercind.gov.in"
 ORDERS_URL = f"{BASE_URL}/recent_orders.html"
 LOOKBACK_DAYS = 7
 
@@ -19,24 +15,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1"
+    "Connection": "keep-alive"
 }
-
-class LegacyTLSAdapter(HTTPAdapter):
-    """Forces legacy TLS settings for older government servers like cercind.gov.in"""
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        ctx.set_ciphers('ALL:@SECLEVEL=0')
-        kwargs['ssl_context'] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
-SESSION = requests.Session()
-SESSION.mount('https://', LegacyTLSAdapter())
-SESSION.mount('http://',  LegacyTLSAdapter())
 
 def parse_date(date_str):
     try:
@@ -46,7 +26,7 @@ def parse_date(date_str):
 
 def extract_pdf_text(pdf_url):
     try:
-        r = SESSION.get(pdf_url, headers=HEADERS, timeout=60)
+        r = requests.get(pdf_url, headers=HEADERS, timeout=60)
         r.raise_for_status()
         with pdfplumber.open(BytesIO(r.content)) as pdf:
             text = ""
@@ -61,7 +41,7 @@ def extract_pdf_text(pdf_url):
 
 def scrape():
     print("Fetching CERC orders page...")
-    r = SESSION.get(ORDERS_URL, headers=HEADERS, timeout=30)
+    r = requests.get(ORDERS_URL, headers=HEADERS, timeout=30)
     r.raise_for_status()
 
     soup = BeautifulSoup(r.text, "html.parser")
