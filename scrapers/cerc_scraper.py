@@ -1,4 +1,4 @@
-import requests
+import subprocess
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime, timedelta
@@ -11,52 +11,29 @@ BASE_URL = "https://cercind.gov.in"
 ORDERS_URL = f"{BASE_URL}/recent_orders.html"
 LOOKBACK_DAYS = 7
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
 
-def get_windows_proxy():
-    """Read proxy settings directly from Windows registry."""
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-        )
-        proxy_enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
-        if proxy_enable:
-            proxy_server, _ = winreg.QueryValueEx(key, 'ProxyServer')
-            print(f"  Using proxy: {proxy_server}")
-            if '=' in proxy_server:
-                proxies = {}
-                for entry in proxy_server.split(';'):
-                    if '=' in entry:
-                        proto, addr = entry.split('=', 1)
-                        proxies[proto] = f'http://{addr}'
-                return proxies
-            else:
-                return {
-                    'http':  f'http://{proxy_server}',
-                    'https': f'http://{proxy_server}'
-                }
-    except Exception as e:
-        print(f"  No proxy found in registry ({e}), proceeding without")
-    return {}
+def fetch(url, binary=False):
+    """Use curl to handle legacy TLS that Python's SSL rejects on cercind.gov.in."""
+    result = subprocess.run(
+        ['curl', '-s', '-L', '-k', '--max-time', '30', url],
+        capture_output=True, timeout=35
+    )
+    if result.returncode != 0:
+        raise Exception(f"curl failed (code {result.returncode}): {result.stderr.decode()}")
+    return result.stdout if binary else result.stdout.decode('utf-8', errors='replace')
 
-PROXIES = get_windows_proxy()
 
 def parse_date(date_str):
     try:
         return datetime.strptime(date_str.strip(), "%d.%m.%Y")
-    except:
+    except Exception:
         return None
+
 
 def extract_pdf_text(pdf_url):
     try:
-        r = requests.get(pdf_url, headers=HEADERS, proxies=PROXIES, timeout=60)
-        r.raise_for_status()
-        with pdfplumber.open(BytesIO(r.content)) as pdf:
+        pdf_bytes = fetch(pdf_url, binary=True)
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             text = ""
             for page in pdf.pages[:5]:
                 t = page.extract_text()
@@ -67,12 +44,11 @@ def extract_pdf_text(pdf_url):
         print(f"  PDF error ({pdf_url}): {e}")
         return ""
 
+
 def scrape():
     print("Fetching CERC orders page...")
-    r = requests.get(ORDERS_URL, headers=HEADERS, proxies=PROXIES, timeout=30)
-    r.raise_for_status()
-
-    soup = BeautifulSoup(r.text, "html.parser")
+    html = fetch(ORDERS_URL)
+    soup = BeautifulSoup(html, "html.parser")
     cutoff = datetime.now() - timedelta(days=LOOKBACK_DAYS)
     items = []
 
@@ -134,6 +110,7 @@ def scrape():
 
     return items
 
+
 def main():
     items = scrape()
     os.makedirs("cerc", exist_ok=True)
@@ -145,6 +122,7 @@ def main():
     with open("cerc/cerc_new.json", "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"\nDone — {len(items)} orders written to cerc/cerc_new.json")
+
 
 if __name__ == "__main__":
     main()
