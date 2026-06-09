@@ -13,9 +13,23 @@ LOOKBACK_DAYS = 7
 
 
 def fetch(url, binary=False):
-    """Use curl to handle legacy TLS that Python's SSL rejects on cercind.gov.in."""
+    """Use curl to handle legacy TLS that Python's SSL rejects on cercind.gov.in.
+
+    --tls-max 1.2  : cercind.gov.in only supports TLS 1.2. Without this, curl's
+                     default TLS 1.3 ClientHello gets RST by the server (curl exit
+                     code 35 / "Connection reset by peer" seen in GitHub Actions).
+    --ciphers ...  : SECLEVEL=1 allows the weaker ciphers the server negotiates.
+    -A             : Browser UA avoids WAF blocks on headless/curl user-agent strings.
+    """
     result = subprocess.run(
-        ['curl', '-s', '-S', '-L', '-k', '--ciphers', 'DEFAULT@SECLEVEL=1', '--max-time', '30', url],
+        [
+            'curl', '-s', '-S', '-L', '-k',
+            '--tls-max', '1.2',
+            '--ciphers', 'DEFAULT@SECLEVEL=1',
+            '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '--max-time', '30',
+            url,
+        ],
         capture_output=True, timeout=35
     )
     if result.returncode != 0:
