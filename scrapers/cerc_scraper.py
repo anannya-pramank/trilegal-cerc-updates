@@ -1,4 +1,5 @@
 import requests
+import winreg
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime, timedelta
@@ -18,6 +19,35 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
+def get_windows_proxy():
+    """Read proxy settings directly from Windows registry."""
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        )
+        proxy_enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+        if proxy_enable:
+            proxy_server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+            print(f"  Using proxy: {proxy_server}")
+            if '=' in proxy_server:
+                proxies = {}
+                for entry in proxy_server.split(';'):
+                    if '=' in entry:
+                        proto, addr = entry.split('=', 1)
+                        proxies[proto] = f'http://{addr}'
+                return proxies
+            else:
+                return {
+                    'http':  f'http://{proxy_server}',
+                    'https': f'http://{proxy_server}'
+                }
+    except Exception as e:
+        print(f"  No proxy found in registry ({e}), proceeding without")
+    return {}
+
+PROXIES = get_windows_proxy()
+
 def parse_date(date_str):
     try:
         return datetime.strptime(date_str.strip(), "%d.%m.%Y")
@@ -26,7 +56,7 @@ def parse_date(date_str):
 
 def extract_pdf_text(pdf_url):
     try:
-        r = requests.get(pdf_url, headers=HEADERS, timeout=60)
+        r = requests.get(pdf_url, headers=HEADERS, proxies=PROXIES, timeout=60)
         r.raise_for_status()
         with pdfplumber.open(BytesIO(r.content)) as pdf:
             text = ""
@@ -41,7 +71,7 @@ def extract_pdf_text(pdf_url):
 
 def scrape():
     print("Fetching CERC orders page...")
-    r = requests.get(ORDERS_URL, headers=HEADERS, timeout=30)
+    r = requests.get(ORDERS_URL, headers=HEADERS, proxies=PROXIES, timeout=30)
     r.raise_for_status()
 
     soup = BeautifulSoup(r.text, "html.parser")
