@@ -15,7 +15,7 @@ LOOKBACK_DAYS = 7
 def fetch(url, binary=False):
     """Use curl to handle legacy TLS that Python's SSL rejects on cercind.gov.in."""
     result = subprocess.run(
-        ['curl', '-s', '-L', '-k', '--max-time', '30', url],
+        ['curl', '-s', '-S', '-L', '-k', '--ciphers', 'DEFAULT@SECLEVEL=1', '--max-time', '30', url],
         capture_output=True, timeout=35
     )
     if result.returncode != 0:
