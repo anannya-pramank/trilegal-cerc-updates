@@ -1,3 +1,9 @@
 requests
 beautifulsoup4
 pdfplumber
+
+# Optional — only needed if you run with CERC_SEMANTIC=1 for embedding-based
+# extraction on very long PDFs. These pull in torch (hundreds of MB), so they
+# are intentionally left out of the default install.
+# sentence-transformers
+# numpy
