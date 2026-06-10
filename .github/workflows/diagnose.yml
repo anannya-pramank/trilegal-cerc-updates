@@ -1,0 +1,20 @@
+name: CERC Diagnose (manual)
+
+# Throwaway diagnostic — run it by hand from the Actions tab (Run workflow).
+# It runs the probe from GitHub's US-hosted runner: the vantage where your
+# scraper actually fails. Compare its output to running cerc_probe.sh locally
+# (in India). Optionally add a CERC_PROXY secret to also test the proxy path.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Run CERC probe (US vantage)
+        env:
+          CERC_PROXY: ${{ secrets.CERC_PROXY }}   # optional; leave unset for a raw US-IP test
+        run: bash diag/cerc_probe.sh
