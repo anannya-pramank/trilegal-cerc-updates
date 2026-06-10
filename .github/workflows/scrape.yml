@@ -2,8 +2,17 @@ name: CERC Scraper
 
 on:
   schedule:
-    - cron: '30 2 * * *'
-  workflow_dispatch:
+    - cron: '30 2 * * *'      # daily at 02:30 UTC (08:00 IST)
+  workflow_dispatch:           # lets you run it by hand from the Actions tab
+
+# Needed so the job can push the updated data back to the repo.
+permissions:
+  contents: write
+
+# Prevent two runs (e.g. a scheduled one and a manual one) from pushing at once.
+concurrency:
+  group: cerc-scraper
+  cancel-in-progress: false
 
 jobs:
   scrape:
@@ -12,48 +21,27 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Run scraper via Indian Proxy
-        run: |
-          echo "Fetching bulk list of free Indian HTTP proxies..."
-          # Pull a list of Indian proxies from ProxyScrape
-          PROXY_LIST=$(curl -s "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=IN")
-          
-          WORKING_PROXY=""
-          
-          # Loop through the list and test them
-          for proxy in $PROXY_LIST; do
-            # Clean up hidden carriage returns from the API response
-            proxy=$(echo "$proxy" | tr -d '\r')
-            
-            if [ -z "$proxy" ]; then continue; fi
-            
-            echo "Testing proxy: $proxy..."
-            # Try to hit CERC through the proxy with a strict 5-second timeout
-            if curl -s -k -L --max-time 5 --proxy "http://$proxy" "https://cercind.gov.in" -o /dev/null; then
-              echo "✅ Success! Found working proxy: $proxy"
-              WORKING_PROXY=$proxy
-              break
-            else
-              echo "❌ Failed or timed out."
-            fi
-          done
-          
-          if [ ! -z "$WORKING_PROXY" ]; then
-            export HTTPS_PROXY="http://$WORKING_PROXY"
-            export HTTP_PROXY="http://$WORKING_PROXY"
-          else
-            echo "⚠️ WARNING: Exhausted the proxy list and found zero working exit nodes. The scraper will likely fail."
-          fi
-          
-          python scrapers/cerc_scraper.py
+      - name: Run scraper
+        # Optional knobs — defaults are fine; uncomment `env:` and a line to change:
+        # env:
+        #   CERC_MAX_ORDERS: '1'   # only fetch the newest N new orders (0 = all)
+        #   CERC_MAX_REGS:   '0'   # same, for regulations
+        #   CERC_SEED:       '1'   # record current IDs as seen, download no PDFs (run once to skip a backlog)
+        #   CERC_SEMANTIC:   '1'   # embedding-based PDF extraction (needs sentence-transformers + numpy)
+        run: python scraper.py
 
-      - name: Commit updated JSON
+      - name: Commit updated data
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add cerc/cerc_new.json
+          git add cerc/
           git diff --staged --quiet || git commit -m "CERC update $(date +'%Y-%m-%d')"
           git push
