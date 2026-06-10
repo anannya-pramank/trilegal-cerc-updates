@@ -36,7 +36,7 @@ jobs:
         #   CERC_MAX_REGS:   '0'   # same, for regulations
         #   CERC_SEED:       '1'   # record current IDs as seen, download no PDFs (run once to skip a backlog)
         #   CERC_SEMANTIC:   '1'   # embedding-based PDF extraction (needs sentence-transformers + numpy)
-        run: python scraper.py
+        run: python scrapers/cerc_scraper.py
 
       - name: Commit updated data
         run: |
