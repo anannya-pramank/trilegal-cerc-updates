@@ -22,6 +22,7 @@ import re
 import io
 import csv
 import json
+import time
 import hashlib
 import subprocess
 from pathlib import Path
@@ -70,6 +71,10 @@ DIGEST_CHARS    = int(os.environ.get("CERC_DIGEST_CHARS", "6000"))
 # of the feed JSON so Power Automate isn't bloated). Off by default.
 KEEP_FULLTEXT   = os.environ.get("CERC_KEEP_FULLTEXT") == "1"
 
+# Seconds to pause between PDF downloads, to avoid tripping CERC's server-side
+# rate limiting (it starts refusing connections under rapid sequential requests).
+REQUEST_DELAY   = float(os.environ.get("CERC_REQUEST_DELAY", "1.0"))
+
 # How many of the newest *new* items to actually fetch+extract per run.
 # 0 = no limit (process every new item). 1 = latest only, 5 = latest five, etc.
 MAX_NEW_ORDERS  = int(os.environ.get("CERC_MAX_ORDERS", "0"))
@@ -106,7 +111,10 @@ def _make_session() -> requests.Session:
     s.headers.update({"User-Agent": USER_AGENT,
                       "Accept-Language": "en-US,en;q=0.9"})
     if Retry is not None:
-        retry = Retry(total=3, backoff_factor=1,
+        # Retry connection errors too (connect=), with longer backoff so a brief
+        # server-side throttle (Connection refused) has time to clear: waits grow
+        # ~2,4,8,16s across attempts.
+        retry = Retry(total=5, connect=5, read=3, backoff_factor=2,
                       status_forcelist=(429, 500, 502, 503, 504),
                       allowed_methods=frozenset(["GET"]))
         adapter = HTTPAdapter(max_retries=retry)
@@ -244,24 +252,27 @@ def _pdf_to_text(content: bytes) -> str:
     return ""
 
 
-def extract_digest(pdf_url: str) -> str:
-    """Download a PDF, extract text, return a relevance-ranked digest. Optionally
-    archives the full text to cerc/fulltext/<id>.md (kept OUT of the feed)."""
+def extract_digest(pdf_url: str):
+    """Download a PDF, extract text, return a relevance-ranked digest.
+    Returns "" when the PDF genuinely has no extractable text, but None when the
+    download/parse FAILED (e.g. server refused the connection) — the caller uses
+    None to skip recording the item so it's retried on a later run instead of
+    being permanently saved with an empty digest. Optionally archives full text."""
     try:
         content = fetch(pdf_url, binary=True)
+    except Exception as e:
+        print(f"  [download failed — will retry next run] {pdf_url}: {e}")
+        return None
+    try:
         full_text = _pdf_to_text(content)
-        if not full_text:
-            return ""
-
-        if KEEP_FULLTEXT:
+        if KEEP_FULLTEXT and full_text:
             ft_dir = DATA_DIR / "fulltext"
             ft_dir.mkdir(parents=True, exist_ok=True)
             (ft_dir / f"{make_id(pdf_url)}.md").write_text(full_text, encoding="utf-8")
-
-        return make_digest(full_text)
+        return make_digest(full_text) if full_text else ""
     except Exception as e:
-        print(f"  [PDF extract error] {pdf_url}: {e}")
-        return ""
+        print(f"  [parse failed — will retry next run] {pdf_url}: {e}")
+        return None
 
 
 # ================= HELPERS =================
@@ -453,17 +464,23 @@ def _process(label, scraped, csv_path, json_path, fields, pdf_field, name_fn, li
         candidates = candidates[:limit]
         print(f"  Limited to newest {len(candidates)} ({label})")
 
-    new = []
+    new, deferred = [], 0
     for e in candidates:
         print(f"  NEW {label}: {name_fn(e)}")
+        digest = extract_digest(e[pdf_field])
+        if digest is None:           # download/parse failed — leave unrecorded so it retries
+            deferred += 1
+            continue
         new.append({"id": make_id(e[pdf_field]), **e,
-                    "pdf_digest": extract_digest(e[pdf_field]),
+                    "pdf_digest": digest,
                     "scraped_at": now_iso()})
+        if REQUEST_DELAY:            # be polite to CERC's server between PDF fetches
+            time.sleep(REQUEST_DELAY)
 
-    print(f"  Wrote {len(new)} {label}")
+    print(f"  Wrote {len(new)} {label}" + (f" ({deferred} deferred to next run)" if deferred else ""))
     if new:
         append_to_csv(csv_path, new, fields)
-        write_json(json_path, new)
+    write_json(json_path, new)   # always overwrite — even [] — so the feed reflects THIS run only
 
 
 def run_orders():
