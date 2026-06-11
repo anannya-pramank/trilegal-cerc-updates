@@ -38,6 +38,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: '1'              # stream logs live
           # Optional knobs — uncomment a line to change behaviour:
+          # CERC_REQUEST_DELAY: '1.0'        # seconds between PDF downloads (default 1.0; raise if throttled)
           # CERC_DIGEST_CHARS:  '6000'       # size of the digest per item (default 6000)
           # CERC_KEEP_FULLTEXT: '1'          # also archive full text to cerc/fulltext/<id>.txt
           # CERC_MAX_ORDERS:    '1'          # only process the newest N new orders (0 = all)
@@ -53,3 +54,19 @@ jobs:
           git add cerc/
           git diff --staged --quiet || git commit -m "CERC update $(date +'%Y-%m-%d')"
           git push
+
+      - name: Notify Power Automate
+        env:
+          PA_WEBHOOK_URL: ${{ secrets.PA_WEBHOOK_URL }}
+        run: |
+          [ -z "$PA_WEBHOOK_URL" ] && echo "No PA_WEBHOOK_URL secret set; skipping." && exit 0
+          for f in cerc/cerc_orders_new.json cerc/cerc_regs_new.json; do
+            [ -f "$f" ] || continue
+            count=$(python -c "import json;print(json.load(open('$f'))['count'])" 2>/dev/null || echo 0)
+            if [ "$count" != "0" ]; then
+              echo "Posting $count items from $f to Power Automate"
+              curl -sS -X POST -H 'Content-Type: application/json' --data @"$f" "$PA_WEBHOOK_URL"
+            else
+              echo "$f has no new items; nothing to send."
+            fi
+          done
