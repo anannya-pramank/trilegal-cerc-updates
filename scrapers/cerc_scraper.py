@@ -58,8 +58,17 @@ ORDERS_URL_TMPL = f"{CERC_BASE}/recent_orders{{year}}.html"    # archives, e.g. 
 REGS_URL        = f"{CERC_BASE}/current_reg.html"
 
 HARD_CAP        = 80_000
-MAX_PDF_PAGES   = 40
+MAX_PDF_PAGES   = 120          # parse deep enough to see the operative order in long tariff orders
 TIMEOUT         = 40
+
+# Size of the relevance-ranked digest emitted per item (chars). This is what the
+# Power Automate feed carries — kept small so the JSON stays light and the
+# notification is skimmable. Bump it if you want more detail per update.
+DIGEST_CHARS    = int(os.environ.get("CERC_DIGEST_CHARS", "6000"))
+
+# Optionally archive the FULL extracted text to cerc/fulltext/<id>.txt (kept OUT
+# of the feed JSON so Power Automate isn't bloated). Off by default.
+KEEP_FULLTEXT   = os.environ.get("CERC_KEEP_FULLTEXT") == "1"
 
 # How many of the newest *new* items to actually fetch+extract per run.
 # 0 = no limit (process every new item). 1 = latest only, 5 = latest five, etc.
@@ -140,41 +149,35 @@ def _chunks(text: str) -> list:
     return [c.strip() for c in re.split(r"\n{2,}", text) if len(c.strip()) > 80]
 
 
-def _keyword_select(chunks: list) -> str:
-    """Dependency-free fallback: keep chunks richest in operative legal language,
-    always retaining the opening (parties/context) and the closing chunks, where
-    the operative order usually sits."""
-    scores = []
-    for c in chunks:
-        low = c.lower()
-        scores.append(sum(low.count(k) for k in LEGAL_KEYWORDS))
-
-    n = len(chunks)
-    must_keep = {0, n - 1, max(0, n - 2)}
-    # Visit must-keep first, then highest-scoring, then document order.
-    order = sorted(range(n), key=lambda i: (i not in must_keep, -scores[i], i))
-
-    selected, used = set(), 0
-    for i in order:
-        if i not in must_keep and used + len(chunks[i]) > HARD_CAP:
-            continue
-        selected.add(i)
-        used += len(chunks[i])
-        if used >= HARD_CAP:
+def _take_to_budget(chunks: list, ranked_idx: list, budget: int) -> str:
+    """Given chunk indices sorted best-first, keep them until the char budget is
+    hit, then re-order to document position so the digest reads naturally."""
+    selected, used = [], 0
+    for i in ranked_idx:
+        if used + len(chunks[i]) > budget and selected:
             break
+        selected.append(i)
+        used += len(chunks[i])
     return "\n\n".join(chunks[i] for i in sorted(selected))
 
 
-def _semantic_select(chunks: list) -> str:
-    """Embedding-based selection. Requires CERC_SEMANTIC=1 plus
-    sentence-transformers + numpy (and the torch they pull in)."""
+def _keyword_rank(chunks: list) -> list:
+    """No-ML fallback ranking: by density of operative legal language."""
+    scores = [sum(c.lower().count(k) for k in LEGAL_KEYWORDS) for c in chunks]
+    return sorted(range(len(chunks)), key=lambda i: (-scores[i], i))
+
+
+def _semantic_rank(chunks: list) -> list:
+    """Embedding ranking (the watcher's method): score each chunk by max cosine
+    similarity to the legal SUMMARY_QUERIES. Runs fully locally — nothing leaves
+    the machine; only a one-time (cached) model download touches the network."""
     import numpy as np
     from sentence_transformers import SentenceTransformer
 
-    if not hasattr(_semantic_select, "_model"):
+    if not hasattr(_semantic_rank, "_model"):
         print("  Loading semantic model …")
-        _semantic_select._model = SentenceTransformer("all-MiniLM-L6-v2")
-    model = _semantic_select._model
+        _semantic_rank._model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = _semantic_rank._model
 
     chunk_embs = model.encode(chunks, show_progress_bar=False, batch_size=64)
     query_embs = model.encode(SUMMARY_QUERIES, show_progress_bar=False)
@@ -184,46 +187,75 @@ def _semantic_select(chunks: list) -> str:
     for q_emb in query_embs:
         q_unit = q_emb / (np.linalg.norm(q_emb) + 1e-8)
         scores = np.maximum(scores, chunk_unit @ q_unit)
-
-    threshold = 0.35 * scores.max()
-    selected, used = [], 0
-    for idx in range(len(chunks)):
-        if scores[idx] >= threshold and used + len(chunks[idx]) <= HARD_CAP:
-            selected.append(idx)
-            used += len(chunks[idx])
-    if not selected:  # threshold too aggressive — take top 10
-        selected = sorted(int(i) for i in np.argsort(scores)[::-1][:10])
-
-    print(f"  Semantic selection: {len(selected)}/{len(chunks)} chunks")
-    return "\n\n".join(chunks[i] for i in selected)
+    return [int(i) for i in np.argsort(scores)[::-1]]
 
 
-def select_relevant(full_text: str) -> str:
+def make_digest(full_text: str) -> str:
+    """Compact, relevance-ranked extract for the notification feed.
+    Embedding ranking by default; keyword ranking if the model can't load."""
     chunks = _chunks(full_text)
     if not chunks:
-        return full_text[:HARD_CAP]
-    if sum(len(c) for c in chunks) <= HARD_CAP:
-        return full_text
-    if os.environ.get("CERC_SEMANTIC") == "1":
-        try:
-            return _semantic_select(chunks)
-        except Exception as e:
-            print(f"  [semantic unavailable: {e}] using keyword selection")
-    return _keyword_select(chunks)
-
-
-def extract_pdf_text(pdf_url: str) -> str:
-    if not HAS_PDFPLUMBER:
-        return ""
+        return full_text[:DIGEST_CHARS]
+    if sum(len(c) for c in chunks) <= DIGEST_CHARS:   # short orders: keep as-is
+        return full_text.strip()
     try:
-        content = fetch(pdf_url, binary=True)
+        ranked = _semantic_rank(chunks)
+    except Exception as e:
+        print(f"  [semantic unavailable: {e}] using keyword ranking")
+        ranked = _keyword_rank(chunks)
+    return _take_to_budget(chunks, ranked, DIGEST_CHARS)
+
+
+def _pdf_to_text(content: bytes) -> str:
+    """Extract document text from raw PDF bytes.
+
+    Primary: pymupdf4llm -> Markdown, which detects tables and reconstructs them
+    as markdown grids (keeps tariff-table row labels attached to their figures)
+    and preserves reading order. Fallback: pdfplumber's plain-text extraction if
+    pymupdf4llm isn't available or errors on a file. Both run fully locally.
+    """
+    try:
+        try:
+            import pymupdf
+        except ImportError:                       # older PyMuPDF exposes 'fitz'
+            import fitz as pymupdf
+        import pymupdf4llm
+
+        doc = pymupdf.open(stream=content, filetype="pdf")
+        pages = list(range(min(doc.page_count, MAX_PDF_PAGES)))
+        md = pymupdf4llm.to_markdown(doc, pages=pages)
+        doc.close()
+        if md and md.strip():
+            return md.strip()
+    except Exception as e:
+        print(f"  [pymupdf4llm failed: {e}] falling back to pdfplumber")
+
+    if HAS_PDFPLUMBER:
         parts = []
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages[:MAX_PDF_PAGES]:
                 t = page.extract_text()
                 if t:
                     parts.append(t)
-        return select_relevant("\n\n".join(parts).strip())
+        return "\n\n".join(parts).strip()
+    return ""
+
+
+def extract_digest(pdf_url: str) -> str:
+    """Download a PDF, extract text, return a relevance-ranked digest. Optionally
+    archives the full text to cerc/fulltext/<id>.md (kept OUT of the feed)."""
+    try:
+        content = fetch(pdf_url, binary=True)
+        full_text = _pdf_to_text(content)
+        if not full_text:
+            return ""
+
+        if KEEP_FULLTEXT:
+            ft_dir = DATA_DIR / "fulltext"
+            ft_dir.mkdir(parents=True, exist_ok=True)
+            (ft_dir / f"{make_id(pdf_url)}.md").write_text(full_text, encoding="utf-8")
+
+        return make_digest(full_text)
     except Exception as e:
         print(f"  [PDF extract error] {pdf_url}: {e}")
         return ""
@@ -422,7 +454,7 @@ def _process(label, scraped, csv_path, json_path, fields, pdf_field, name_fn, li
     for e in candidates:
         print(f"  NEW {label}: {name_fn(e)}")
         new.append({"id": make_id(e[pdf_field]), **e,
-                    "pdf_text": extract_pdf_text(e[pdf_field]),
+                    "pdf_digest": extract_digest(e[pdf_field]),
                     "scraped_at": now_iso()})
 
     print(f"  Wrote {len(new)} {label}")
