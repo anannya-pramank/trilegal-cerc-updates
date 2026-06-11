@@ -53,12 +53,23 @@ REGS_JSON       = DATA_DIR / "cerc_regs_new.json"
 
 # www host: modern TLS, works with plain requests, no proxy required.
 CERC_BASE       = "https://www.cercind.gov.in"
-ORDERS_URL_TMPL = f"{CERC_BASE}/recent_orders{{year}}.html"
+ORDERS_URL      = f"{CERC_BASE}/recent_orders.html"            # current year (the live page)
+ORDERS_URL_TMPL = f"{CERC_BASE}/recent_orders{{year}}.html"    # archives, e.g. ...orders2025.html
 REGS_URL        = f"{CERC_BASE}/current_reg.html"
 
 HARD_CAP        = 80_000
 MAX_PDF_PAGES   = 40
 TIMEOUT         = 40
+
+# How many of the newest *new* items to actually fetch+extract per run.
+# 0 = no limit (process every new item). 1 = latest only, 5 = latest five, etc.
+MAX_NEW_ORDERS  = int(os.environ.get("CERC_MAX_ORDERS", "0"))
+MAX_NEW_REGS    = int(os.environ.get("CERC_MAX_REGS", "0"))
+
+# Seed mode: record every currently-listed ID into the ledger WITHOUT downloading
+# any PDFs, then exit each scraper. Run once (CERC_SEED=1) to skip the first-run
+# backlog so later runs only pick up genuinely new items.
+SEED_ONLY       = os.environ.get("CERC_SEED") == "1"
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -224,6 +235,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_date(s: str):
+    """Best-effort parse of CERC date strings; returns datetime.min on failure
+    so undated rows sort last."""
+    s = (s or "").strip()
+    for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return datetime.min
+
+
 def make_id(url: str) -> str:
     return hashlib.sha1(url.encode()).hexdigest()[:16]
 
@@ -240,26 +263,23 @@ def absolute_url(href: str) -> str:
 # ================= ORDERS SCRAPER =================
 
 def resolve_orders_url() -> str:
-    year = datetime.now(timezone.utc).year
-    for y in (year, year - 1):
-        url = ORDERS_URL_TMPL.format(year=y)
-        try:
-            html = fetch(url, timeout=20)
-            if len(html) > 5000:
-                print(f"  Using orders page: {url}")
-                return url
-        except Exception as e:
-            print(f"  {url} -> {e}")
-    raise RuntimeError("Could not resolve a valid CERC orders URL")
+    # Default: the live current-year page (recent_orders.html).
+    # To deliberately scrape a past year's archive, set CERC_ORDERS_YEAR=2025
+    # (uses recent_orders2025.html). No silent fallback to another year — if the
+    # page is wrong/missing the run fails loudly rather than scraping last year.
+    year = os.environ.get("CERC_ORDERS_YEAR", "").strip()
+    return ORDERS_URL_TMPL.format(year=year) if year else ORDERS_URL
 
 
 def scrape_orders() -> list:
-    html = fetch(resolve_orders_url())
+    url = resolve_orders_url()
+    print(f"  Using orders page: {url}")
+    html = fetch(url)
     soup = BeautifulSoup(html, "html.parser")
     target = next((t for t in soup.find_all("table")
                    if "Petition No." in t.get_text()), None)
     if not target:
-        print("ERROR: CERC orders table not found")
+        print(f"ERROR: CERC orders table not found at {url}")
         return []
 
     results = []
@@ -374,54 +394,63 @@ def write_json(json_path: Path, items: list):
 
 # ================= MAIN =================
 
-def run_orders():
-    fields = ["id", "petition_no", "pdf_url", "scraped_at"]
-    ensure_csv(ORDERS_CSV, fields)
-    seen = load_ids(ORDERS_CSV)
+def _process(label, scraped, csv_path, json_path, fields, pdf_field, name_fn, limit):
+    ensure_csv(csv_path, fields)
+    seen = load_ids(csv_path)
 
-    print("Scraping CERC orders …")
-    scraped = scrape_orders()
-    print(f"  {len(scraped)} entries on page")
+    candidates = [e for e in scraped if make_id(e[pdf_field]) not in seen]
+    print(f"  {len(candidates)} new (of {len(scraped)} listed)")
+
+    # Seed mode: record IDs as seen, download nothing, then stop.
+    if SEED_ONLY:
+        rows = [{"id": make_id(e[pdf_field]), **e, "scraped_at": now_iso()}
+                for e in candidates]
+        if rows:
+            append_to_csv(csv_path, rows, fields)
+        print(f"  Seeded {len(rows)} {label} IDs (no PDFs fetched)")
+        return
+
+    # Newest first, then optionally keep only the latest N.
+    candidates.sort(
+        key=lambda e: parse_date(e.get("date_posted") or e.get("gazette_date", "")),
+        reverse=True)
+    if limit:
+        candidates = candidates[:limit]
+        print(f"  Limited to newest {len(candidates)} ({label})")
 
     new = []
-    for e in scraped:
-        item_id = make_id(e["pdf_url"])
-        if item_id in seen:
-            continue
-        print(f"  NEW order: {e['petition_no']}")
-        new.append({"id": item_id, **e,
-                    "pdf_text": extract_pdf_text(e["pdf_url"]),
+    for e in candidates:
+        print(f"  NEW {label}: {name_fn(e)}")
+        new.append({"id": make_id(e[pdf_field]), **e,
+                    "pdf_text": extract_pdf_text(e[pdf_field]),
                     "scraped_at": now_iso()})
 
-    print(f"  New orders: {len(new)}")
+    print(f"  Wrote {len(new)} {label}")
     if new:
-        append_to_csv(ORDERS_CSV, new, fields)
-        write_json(ORDERS_JSON, new)
+        append_to_csv(csv_path, new, fields)
+        write_json(json_path, new)
+
+
+def run_orders():
+    print("Scraping CERC orders …")
+    _process(
+        "order", scrape_orders(), ORDERS_CSV, ORDERS_JSON,
+        ["id", "petition_no", "pdf_url", "scraped_at"],
+        pdf_field="pdf_url",
+        name_fn=lambda e: e["petition_no"],
+        limit=MAX_NEW_ORDERS,
+    )
 
 
 def run_regulations():
-    fields = ["id", "sl_no", "reg_name", "noti_pdf_url", "scraped_at"]
-    ensure_csv(REGS_CSV, fields)
-    seen = load_ids(REGS_CSV)
-
     print("\nScraping CERC regulations …")
-    scraped = scrape_regulations()
-    print(f"  {len(scraped)} entries on page")
-
-    new = []
-    for e in scraped:
-        item_id = make_id(e["noti_pdf_url"])
-        if item_id in seen:
-            continue
-        print(f"  NEW regulation: [{e['sl_no']}] {e['reg_name'][:70]}")
-        new.append({"id": item_id, **e,
-                    "pdf_text": extract_pdf_text(e["noti_pdf_url"]),
-                    "scraped_at": now_iso()})
-
-    print(f"  New regulations: {len(new)}")
-    if new:
-        append_to_csv(REGS_CSV, new, fields)
-        write_json(REGS_JSON, new)
+    _process(
+        "regulation", scrape_regulations(), REGS_CSV, REGS_JSON,
+        ["id", "sl_no", "reg_name", "noti_pdf_url", "scraped_at"],
+        pdf_field="noti_pdf_url",
+        name_fn=lambda e: f"[{e['sl_no']}] {e['reg_name'][:70]}",
+        limit=MAX_NEW_REGS,
+    )
 
 
 def main():
