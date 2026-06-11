@@ -25,9 +25,6 @@ jobs:
           python-version: '3.12'
           cache: 'pip'                       # cache pip downloads (torch etc.)
 
-      - name: Install Tesseract (for pymupdf4llm OCR on scanned pages)
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
-
       - name: Cache embedding model
         uses: actions/cache@v4
         with:
