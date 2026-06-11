@@ -1,9 +1,14 @@
 requests
 beautifulsoup4
+
+# PDF parsing: pymupdf4llm extracts table-aware Markdown (preferred); it pulls in
+# pymupdf. pdfplumber is kept as an automatic fallback parser.
+pymupdf4llm
 pdfplumber
 
-# Optional — only needed if you run with CERC_SEMANTIC=1 for embedding-based
-# extraction on very long PDFs. These pull in torch (hundreds of MB), so they
-# are intentionally left out of the default install.
-# sentence-transformers
-# numpy
+# Local embedding model for relevance-ranked digests (the watcher approach).
+# Runs on CPU on the runner; no API key, no data leaves the machine. Pulls in
+# torch, so the install is heavier — the workflow caches pip + the model so only
+# the first run is slow.
+sentence-transformers
+numpy
