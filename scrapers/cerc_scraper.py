@@ -223,7 +223,10 @@ def _pdf_to_text(content: bytes) -> str:
 
         doc = pymupdf.open(stream=content, filetype="pdf")
         pages = list(range(min(doc.page_count, MAX_PDF_PAGES)))
-        md = pymupdf4llm.to_markdown(doc, pages=pages)
+        # use_ocr=False: this pymupdf4llm version defaults to OCR-ing EVERY page,
+        # which is slow and worse than the embedded text layer that CERC PDFs have.
+        # Disabling it reads the real text directly. (Flip on only for scanned PDFs.)
+        md = pymupdf4llm.to_markdown(doc, pages=pages, use_ocr=False)
         doc.close()
         if md and md.strip():
             return md.strip()
