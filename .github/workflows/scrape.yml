@@ -3,13 +3,11 @@ name: CERC Scraper
 on:
   schedule:
     - cron: '30 2 * * *'      # daily at 02:30 UTC (08:00 IST)
-  workflow_dispatch:           # lets you run it by hand from the Actions tab
+  workflow_dispatch:
 
-# Needed so the job can push the updated data back to the repo.
 permissions:
   contents: write
 
-# Prevent two runs (e.g. a scheduled one and a manual one) from pushing at once.
 concurrency:
   group: cerc-scraper
   cancel-in-progress: false
@@ -25,18 +23,30 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'                       # cache pip downloads (torch etc.)
+
+      - name: Install Tesseract (for pymupdf4llm OCR on scanned pages)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface         # all-MiniLM downloaded once, reused after
+          key: hf-all-minilm-l6-v2
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
       - name: Run scraper
         env:
-          PYTHONUNBUFFERED: '1'    # stream print() output live instead of buffering
+          PYTHONUNBUFFERED: '1'              # stream logs live
           # Optional knobs — uncomment a line to change behaviour:
-          # CERC_MAX_ORDERS: '1'   # only fetch the newest N new orders (0 = all)
-          # CERC_MAX_REGS:   '0'   # same, for regulations
-          # CERC_SEED:       '1'   # record current IDs as seen, download no PDFs (run once to skip a backlog)
-          # CERC_SEMANTIC:   '1'   # embedding-based PDF extraction (needs sentence-transformers + numpy)
+          # CERC_DIGEST_CHARS:  '6000'       # size of the digest per item (default 6000)
+          # CERC_KEEP_FULLTEXT: '1'          # also archive full text to cerc/fulltext/<id>.txt
+          # CERC_MAX_ORDERS:    '1'          # only process the newest N new orders (0 = all)
+          # CERC_MAX_REGS:      '0'
+          # CERC_SEED:          '1'          # record current IDs as seen, download nothing (run once)
+          # CERC_ORDERS_YEAR:   '2025'       # scrape a past-year archive instead of the live page
         run: python scrapers/cerc_scraper.py
 
       - name: Commit updated data
