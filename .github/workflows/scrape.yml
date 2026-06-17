@@ -47,6 +47,20 @@ jobs:
           # CERC_ORDERS_YEAR:   '2025'       # scrape a past-year archive instead of the live page
         run: python scrapers/cerc_scraper.py
 
+      - name: Load into Supabase
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          [ -z "$DATABASE_URL" ] && echo "No DATABASE_URL secret set; skipping load." && exit 0
+          [ -f cerc/cerc_orders_new.json ] || { echo "No new orders file; skipping."; exit 0; }
+          count=$(python -c "import json;print(json.load(open('cerc/cerc_orders_new.json'))['count'])" 2>/dev/null || echo 0)
+          if [ "$count" != "0" ]; then
+            echo "Loading $count orders into Supabase"
+            python load_cerc.py cerc/cerc_orders_new.json
+          else
+            echo "No new orders; nothing to load."
+          fi
+
       - name: Commit updated data
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
