@@ -12,3 +12,6 @@ pdfplumber
 # the first run is slow.
 sentence-transformers
 numpy
+
+# Postgres driver for the Supabase loader (load_cerc.py).
+psycopg2-binary
