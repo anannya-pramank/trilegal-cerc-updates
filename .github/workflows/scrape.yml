@@ -44,7 +44,7 @@ jobs:
           # CERC_MAX_ORDERS:    '1'          # only process the newest N new orders (0 = all)
           # CERC_MAX_REGS:      '0'
           # CERC_SEED:          '1'          # record current IDs as seen, download nothing (run once)
-          # CERC_ORDERS_YEAR:   '2025'       # scrape a past-year archive instead of the live page
+          # CERC_ORDERS_YEAR:   '2026'       # scrape a past-year archive instead of the live page
         run: python scrapers/cerc_scraper.py
 
       - name: Load into Supabase
