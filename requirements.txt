@@ -15,3 +15,6 @@ numpy
 
 # Postgres driver for the Supabase loader (load_cerc.py).
 psycopg2-binary
+
+mcp[cli]
+uvicorn
