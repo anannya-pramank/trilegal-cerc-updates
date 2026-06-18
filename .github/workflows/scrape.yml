@@ -40,7 +40,7 @@ jobs:
           # Optional knobs — uncomment a line to change behaviour:
           # CERC_REQUEST_DELAY: '1.0'        # seconds between PDF downloads (default 1.0; raise if throttled)
           # CERC_DIGEST_CHARS:  '6000'       # size of the digest per item (default 6000)
-          # CERC_KEEP_FULLTEXT: '1'          # also archive full text to cerc/fulltext/<id>.txt
+          CERC_KEEP_FULLTEXT: '1'          # also archive full text to cerc/fulltext/<id>.txt
           # CERC_MAX_ORDERS:    '1'          # only process the newest N new orders (0 = all)
           # CERC_MAX_REGS:      '0'
           # CERC_SEED:          '1'          # record current IDs as seen, download nothing (run once)
