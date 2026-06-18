@@ -64,6 +64,44 @@ def parse_cerc_date(value):
     return None  # unrecognised format -> store NULL rather than fail
 
 
+def load_fulltext_map(json_path: str) -> dict:
+    """
+    Build a map of {id: full_text} from the individual .md files that
+    cerc_scraper.py writes to cerc/fulltext/<id>.md when CERC_KEEP_FULLTEXT=1.
+    Falls back to the legacy cerc_orders_fulltext.json sidecar if present.
+    Returns an empty dict if neither source exists.
+    """
+    fulltext_map = {}
+    base_dir = os.path.dirname(os.path.abspath(json_path))
+
+    # Primary: per-file .md approach (what the scraper actually writes)
+    ft_dir = os.path.join(base_dir, "fulltext")
+    if os.path.isdir(ft_dir):
+        for fname in os.listdir(ft_dir):
+            if fname.endswith(".md"):
+                fid = fname[:-3]  # strip .md to get the id
+                try:
+                    with open(os.path.join(ft_dir, fname), encoding="utf-8") as f:
+                        fulltext_map[fid] = f.read()
+                except Exception as e:
+                    print(f"Warning: could not read fulltext/{fname} ({e})")
+        if fulltext_map:
+            print(f"Loaded full text for {len(fulltext_map)} orders from fulltext/ dir.")
+            return fulltext_map
+
+    # Fallback: legacy JSON sidecar
+    ft_path = os.path.join(base_dir, "cerc_orders_fulltext.json")
+    if os.path.exists(ft_path):
+        try:
+            with open(ft_path, "r", encoding="utf-8") as f:
+                fulltext_map = json.load(f).get("fulltext", {})
+            print(f"Loaded full text for {len(fulltext_map)} orders from sidecar.")
+        except Exception as e:
+            print(f"Warning: could not read fulltext sidecar ({e}); continuing without.")
+
+    return fulltext_map
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("Usage: python load_cerc.py path/to/cerc_orders_new.json")
@@ -76,18 +114,9 @@ def main():
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # Optional sidecar: cerc_orders_fulltext.json (gitignored) holds full
-    # extracted text keyed by id. If present, load it so we can populate the
-    # pdf_fulltext column. Absent -> full text simply stays null.
-    fulltext_map = {}
-    ft_path = os.path.join(os.path.dirname(json_path) or ".", "cerc_orders_fulltext.json")
-    if os.path.exists(ft_path):
-        try:
-            with open(ft_path, "r", encoding="utf-8") as f:
-                fulltext_map = json.load(f).get("fulltext", {})
-            print(f"Loaded full text for {len(fulltext_map)} orders from sidecar.")
-        except Exception as e:
-            print(f"Warning: could not read fulltext sidecar ({e}); continuing without.")
+    fulltext_map = load_fulltext_map(json_path)
+    if not fulltext_map:
+        print("No full text found (set CERC_KEEP_FULLTEXT=1 in the scraper to enable).")
 
     # CERC shape is {generated_at, count, items: [...]}. Also tolerate a bare list.
     if isinstance(data, dict):
@@ -121,7 +150,7 @@ def main():
             order.get("category"),
             order.get("pdf_url"),
             order.get("pdf_digest"),
-            fulltext_map.get(oid),     # full text from sidecar, or None
+            fulltext_map.get(oid),     # full text from fulltext/<id>.md, or None
             vec_literal,
             order.get("scraped_at"),   # ISO timestamp, Postgres parses directly
         ))
