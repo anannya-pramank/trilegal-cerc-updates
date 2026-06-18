@@ -18,3 +18,4 @@ psycopg2-binary
 
 mcp[cli]
 uvicorn
+mcp[cli]>=1.6.0
