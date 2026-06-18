@@ -1,0 +1,3 @@
+# Full text is pushed to Supabase by the loader, never committed.
+cerc/cerc_orders_fulltext.json
+cerc/fulltext/
