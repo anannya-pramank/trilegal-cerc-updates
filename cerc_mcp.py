@@ -296,4 +296,6 @@ def list_recent(days: int = 30, limit: int = 20) -> list[dict]:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", port=int(os.environ.get("PORT", 8000)))
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(mcp.sse_app(), host="0.0.0.0", port=port)
