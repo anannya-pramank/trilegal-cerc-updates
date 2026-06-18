@@ -76,6 +76,19 @@ def main():
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    # Optional sidecar: cerc_orders_fulltext.json (gitignored) holds full
+    # extracted text keyed by id. If present, load it so we can populate the
+    # pdf_fulltext column. Absent -> full text simply stays null.
+    fulltext_map = {}
+    ft_path = os.path.join(os.path.dirname(json_path) or ".", "cerc_orders_fulltext.json")
+    if os.path.exists(ft_path):
+        try:
+            with open(ft_path, "r", encoding="utf-8") as f:
+                fulltext_map = json.load(f).get("fulltext", {})
+            print(f"Loaded full text for {len(fulltext_map)} orders from sidecar.")
+        except Exception as e:
+            print(f"Warning: could not read fulltext sidecar ({e}); continuing without.")
+
     # CERC shape is {generated_at, count, items: [...]}. Also tolerate a bare list.
     if isinstance(data, dict):
         orders = data.get("items") or data.get("orders") or []
@@ -98,8 +111,9 @@ def main():
         if len(emb) != EMBED_DIM:
             sys.exit(f"Embedding dim {len(emb)} != expected {EMBED_DIM}; check the model.")
         vec_literal = "[" + ",".join(f"{x:.6f}" for x in emb) + "]"
+        oid = str(order.get("id") or "").strip()
         rows.append((
-            str(order.get("id") or "").strip(),
+            oid,
             order.get("petition_no"),
             order.get("subject"),
             parse_cerc_date(order.get("date_order")),
@@ -107,6 +121,7 @@ def main():
             order.get("category"),
             order.get("pdf_url"),
             order.get("pdf_digest"),
+            fulltext_map.get(oid),     # full text from sidecar, or None
             vec_literal,
             order.get("scraped_at"),   # ISO timestamp, Postgres parses directly
         ))
@@ -117,18 +132,19 @@ def main():
     sql = """
         insert into cerc_orders
             (id, petition_no, subject, date_order, date_posted,
-             category, pdf_url, pdf_digest, embedding, scraped_at)
+             category, pdf_url, pdf_digest, pdf_fulltext, embedding, scraped_at)
         values %s
         on conflict (id) do update set
-            petition_no = excluded.petition_no,
-            subject     = excluded.subject,
-            date_order  = excluded.date_order,
-            date_posted = excluded.date_posted,
-            category    = excluded.category,
-            pdf_url     = excluded.pdf_url,
-            pdf_digest  = excluded.pdf_digest,
-            embedding   = excluded.embedding,
-            scraped_at  = excluded.scraped_at;
+            petition_no  = excluded.petition_no,
+            subject      = excluded.subject,
+            date_order   = excluded.date_order,
+            date_posted  = excluded.date_posted,
+            category     = excluded.category,
+            pdf_url      = excluded.pdf_url,
+            pdf_digest   = excluded.pdf_digest,
+            pdf_fulltext = coalesce(excluded.pdf_fulltext, cerc_orders.pdf_fulltext),
+            embedding    = excluded.embedding,
+            scraped_at   = excluded.scraped_at;
     """
 
     conn = psycopg2.connect(db_url)
@@ -136,7 +152,7 @@ def main():
         with conn.cursor() as cur:
             execute_values(
                 cur, sql, rows,
-                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s)",
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s)",
             )
         conn.commit()
     finally:
