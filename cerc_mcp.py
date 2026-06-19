@@ -251,7 +251,7 @@ def get_order(identifier: str) -> dict | None:
     """
     sql = """
         select id, petition_no, subject, category, date_order, date_posted,
-               pdf_url, pdf_digest, scraped_at
+               pdf_url, pdf_digest, pdf_fulltext, scraped_at
         from cerc_orders
         where id = %s or petition_no = %s
         limit 1
