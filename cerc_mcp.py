@@ -30,7 +30,14 @@ from mcp.server.fastmcp import FastMCP
 
 MODEL_NAME = "all-MiniLM-L6-v2"   # must match the loader's model (384-dim)
 
-mcp = FastMCP("cerc")
+from mcp.server.transport_security import TransportSecuritySettings
+
+mcp = FastMCP(
+    "cerc",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+)
 
 # Load the embedding model lazily on first use, NOT at import time.
 # Loading at import delays the MCP handshake and can trip the client's
@@ -297,22 +304,9 @@ def list_recent(days: int = 30, limit: int = 20) -> list[dict]:
 
 if __name__ == "__main__":
     import uvicorn
-
-    class FixHostMiddleware:
-        def __init__(self, app):
-            self.app = app
-
-        async def __call__(self, scope, receive, send):
-            if scope["type"] in ("http", "websocket"):
-                scope["headers"] = [
-                    (k, v) for k, v in scope.get("headers", [])
-                    if k != b"host"
-                ] + [(b"host", b"localhost")]
-            await self.app(scope, receive, send)
-
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(
-        FixHostMiddleware(mcp.streamable_http_app()),
+        mcp.streamable_http_app(),
         host="0.0.0.0",
         port=port,
         proxy_headers=True,
