@@ -297,11 +297,22 @@ def list_recent(days: int = 30, limit: int = 20) -> list[dict]:
 
 if __name__ == "__main__":
     import uvicorn
+
+    class FixHostMiddleware:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] in ("http", "websocket"):
+                scope["headers"] = [
+                    (k, v) for k, v in scope.get("headers", [])
+                    if k != b"host"
+                ] + [(b"host", b"localhost")]
+            await self.app(scope, receive, send)
+
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(
-        mcp.streamable_http_app(
-            allowed_hosts=["trilegal-cerc-updates-production.up.railway.app", "localhost"]
-        ),
+        FixHostMiddleware(mcp.streamable_http_app()),
         host="0.0.0.0",
         port=port,
         proxy_headers=True,
