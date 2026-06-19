@@ -299,7 +299,9 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(
-        mcp.streamable_http_app(),
+        mcp.streamable_http_app(
+            allowed_hosts=["trilegal-cerc-updates-production.up.railway.app", "localhost"]
+        ),
         host="0.0.0.0",
         port=port,
         proxy_headers=True,
