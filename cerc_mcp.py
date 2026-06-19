@@ -30,7 +30,10 @@ from mcp.server.fastmcp import FastMCP
 
 MODEL_NAME = "all-MiniLM-L6-v2"   # must match the loader's model (384-dim)
 
-mcp = FastMCP("cerc")
+mcp = FastMCP(
+    "cerc",
+    allowed_hosts=["trilegal-cerc-updates-production.up.railway.app", "localhost"]
+)
 
 # Load the embedding model lazily on first use, NOT at import time.
 # Loading at import delays the MCP handshake and can trip the client's
