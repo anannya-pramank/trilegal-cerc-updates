@@ -1,0 +1,72 @@
+name: APTEL Backfill (manual)
+
+# Manual only — NO schedule. This is a one-shot/occasional backfill, not the
+# daily incremental. Trigger it from the Actions tab. Safe to re-run: the load
+# is idempotent (upsert on id) and skips orders already in aptel_orders.
+#
+# Prerequisite: the aptel_orders table must already exist. Either run the DDL
+# once in the Supabase SQL editor, or tick init_db below on the first run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Year to backfill'
+        required: true
+        default: '2026'
+      dry_run:
+        description: 'Scrape + report only, write nothing'
+        type: boolean
+        default: true
+      limit:
+        description: 'Cap number of orders (0 = all)'
+        required: true
+        default: '0'
+      init_db:
+        description: 'Create table + indexes first (needs CREATE EXTENSION rights)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aptel-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface          # same MiniLM as the daily scraper
+          key: hf-all-minilm-l6-v2
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Initialise schema (optional)
+        if: ${{ inputs.init_db }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python aptel_cold_load.py --init-db
+
+      - name: Run backfill
+        env:
+          PYTHONUNBUFFERED: '1'
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS="--year ${{ inputs.year }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ inputs.limit }}" != "0" ] && ARGS="$ARGS --limit ${{ inputs.limit }}"
+          echo "Running: aptel_cold_load.py $ARGS"
+          python aptel_cold_load.py $ARGS
