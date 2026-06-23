@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-cerc_mcp.py — MCP server over the CERC orders store in Supabase.
+cerc_mcp.py — MCP server over the CERC + APTEL orders stores in Supabase.
 
-Exposes four tools to an MCP client (e.g. Claude Desktop, GitHub Copilot):
+Exposes eight tools to an MCP client (e.g. Claude Desktop, GitHub Copilot).
 
-  search_orders  — semantic search over order digests, with optional
-                   date-range and category filters.
-  order_stats    — aggregate counts (by month / quarter / year / category)
-                   for trend questions like "this year vs last".
-  get_order      — full record for one order by id or petition number.
-  list_recent    — the most recently posted orders (the "what's new" view).
+CERC (cerc_orders table):
+  search_orders        — semantic search over order digests, with optional
+                         date-range and category filters.
+  order_stats          — aggregate counts (by month / quarter / year /
+                         category) for trend questions like "this year vs last".
+  get_order            — full record for one order by id or petition number.
+  list_recent          — the most recently posted orders ("what's new").
+
+APTEL (aptel_orders table):
+  search_aptel_orders  — hybrid search over APTEL judgement digests, with
+                         optional date-range and bench filters.
+  aptel_order_stats    — aggregate counts (by month / quarter / year / bench).
+  get_aptel_order      — full record for one judgement by id or petition number.
+  list_recent_aptel    — the most recently uploaded judgements ("what's new").
 
 Runs as an SSE HTTP server (for remote MCP clients like GitHub Copilot cloud agent).
 The embedding model is the same MiniLM used by the loader, so query vectors
@@ -300,6 +308,348 @@ def list_recent(days: int = 30, limit: int = 20) -> list[dict]:
         d["date_posted"] = str(d["date_posted"]) if d["date_posted"] else None
         out.append(d)
     return out
+
+
+# =====================================================================
+# APTEL tools — same shapes as the CERC tools above, adapted to the
+# aptel_orders schema:
+#   subject     -> cause_title
+#   category    -> bench
+#   date_order  -> date_of_decision
+#   date_posted -> date_uploaded
+# The table carries the same embedding(384) + fts contract, so hybrid
+# search is identical bar the column names.
+# =====================================================================
+
+
+@mcp.tool()
+def search_aptel_orders(
+    query: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    bench: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """
+    Hybrid search over APTEL (Appellate Tribunal for Electricity)
+    judgements: semantic (vector) + keyword (full-text) retrieval,
+    fused with Reciprocal Rank Fusion.
+
+    Use this for APTEL appeals and judgements — the appellate layer
+    above CERC and the state commissions. Combines meaning-based
+    matching (paraphrased concepts) with exact-token matching (appeal
+    numbers, section numbers, party names).
+
+    Args:
+        query: What to find — natural language, an appeal/petition
+            number, or a mix.
+        date_from: Optional ISO date (YYYY-MM-DD); only judgements with
+            date_of_decision on or after this are returned.
+        date_to: Optional ISO date (YYYY-MM-DD); only judgements with
+            date_of_decision on or before this are returned.
+        bench: Optional exact bench filter.
+        limit: Maximum number of judgements to return (default 10).
+
+    Returns the best matching judgements, each with id, petition_no,
+    cause_title, bench, date_of_decision, pdf_url, a digest snippet, and
+    an rrf_score (higher = better; a fused rank score, not a similarity
+    percentage).
+    """
+    qvec = _embed(query)
+
+    filters = []
+    filter_params: list = []
+    if date_from:
+        filters.append("date_of_decision >= %s")
+        filter_params.append(date_from)
+    if date_to:
+        filters.append("date_of_decision <= %s")
+        filter_params.append(date_to)
+    if bench:
+        filters.append("bench = %s")
+        filter_params.append(bench)
+    extra = (" and " + " and ".join(filters)) if filters else ""
+
+    pool = max(limit * 4, 40)
+
+    sql = f"""
+        with vec as (
+            select id, row_number() over (order by embedding <=> %s::vector) as rnk
+            from aptel_orders
+            where embedding is not null{extra}
+            order by embedding <=> %s::vector
+            limit %s
+        ),
+        kw as (
+            select id, row_number() over (
+                       order by ts_rank_cd(fts, websearch_to_tsquery('english', %s)) desc
+                   ) as rnk
+            from aptel_orders
+            where fts @@ websearch_to_tsquery('english', %s){extra}
+            limit %s
+        ),
+        fused as (
+            select coalesce(vec.id, kw.id) as id,
+                   coalesce(1.0/(%s + vec.rnk), 0)
+                 + coalesce(1.0/(%s + kw.rnk), 0) as rrf_score
+            from vec full outer join kw on vec.id = kw.id
+        )
+        select a.id, a.petition_no, a.cause_title, a.bench,
+               a.date_of_decision, a.pdf_url,
+               left(a.pdf_digest, 600) as digest_snippet,
+               f.rrf_score
+        from fused f join aptel_orders a on a.id = f.id
+        order by f.rrf_score desc
+        limit %s
+    """
+    params = [
+        qvec, qvec, *filter_params, pool,
+        query, query, *filter_params, pool,
+        RRF_K, RRF_K,
+        limit,
+    ]
+
+    with _db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    return [dict(r) | {"date_of_decision": str(r["date_of_decision"]) if r["date_of_decision"] else None}
+            for r in rows]
+
+
+@mcp.tool()
+def aptel_order_stats(
+    group_by: str = "month",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    bench: str | None = None,
+) -> list[dict]:
+    """
+    Aggregate APTEL judgement counts for trend analysis.
+
+    Args:
+        group_by: One of "month", "quarter", "year", or "bench".
+        date_from: Optional ISO date lower bound on date_of_decision.
+        date_to: Optional ISO date upper bound on date_of_decision.
+        bench: Optional bench filter applied before grouping.
+
+    Returns a list of {period/bench, count} rows, ordered.
+    """
+    valid = {"month", "quarter", "year", "bench"}
+    if group_by not in valid:
+        raise ValueError(f"group_by must be one of {sorted(valid)}")
+
+    filters = ["date_of_decision is not null"]
+    params: list = []
+    if date_from:
+        filters.append("date_of_decision >= %s")
+        params.append(date_from)
+    if date_to:
+        filters.append("date_of_decision <= %s")
+        params.append(date_to)
+    if bench:
+        filters.append("bench = %s")
+        params.append(bench)
+    where = " and ".join(filters)
+
+    if group_by == "bench":
+        sql = f"""
+            select coalesce(bench, '(unspecified)') as bucket, count(*) as count
+            from aptel_orders where {where}
+            group by bucket order by count desc
+        """
+    else:
+        sql = f"""
+            select to_char(date_trunc('{group_by}', date_of_decision), 'YYYY-MM-DD') as bucket,
+                   count(*) as count
+            from aptel_orders where {where}
+            group by bucket order by bucket
+        """
+
+    with _db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@mcp.tool()
+def get_aptel_order(identifier: str) -> dict | None:
+    """
+    Fetch the full record for a single APTEL judgement.
+
+    Args:
+        identifier: Either the judgement id (the scraper's hash) or the
+            appeal/petition number.
+
+    Returns the complete judgement including the full pdf_digest, or null
+    if no match is found.
+    """
+    sql = """
+        select id, petition_no, cause_title, bench, date_of_decision, date_uploaded,
+               pdf_url, pdf_digest, pdf_fulltext, scraped_at
+        from aptel_orders
+        where id = %s or petition_no = %s
+        limit 1
+    """
+    with _db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (identifier, identifier))
+            row = cur.fetchone()
+    if not row:
+        return None
+    r = dict(row)
+    r["date_of_decision"] = str(r["date_of_decision"]) if r["date_of_decision"] else None
+    r["date_uploaded"] = str(r["date_uploaded"]) if r["date_uploaded"] else None
+    r["scraped_at"] = str(r["scraped_at"]) if r["scraped_at"] else None
+    return r
+
+
+@mcp.tool()
+def list_recent_aptel(days: int = 30, limit: int = 20) -> list[dict]:
+    """
+    List the most recently uploaded APTEL judgements.
+
+    Args:
+        days: Look-back window on date_uploaded (default 30).
+        limit: Maximum number of judgements to return (default 20).
+
+    Returns recent judgements ordered newest-first, each with id,
+    petition_no, cause_title, bench, date_of_decision, date_uploaded,
+    pdf_url. Use this for "what's new in APTEL" questions.
+    """
+    sql = """
+        select id, petition_no, cause_title, bench, date_of_decision, date_uploaded, pdf_url
+        from aptel_orders
+        where date_uploaded >= (current_date - %s::int)
+        order by date_uploaded desc, date_of_decision desc
+        limit %s
+    """
+    with _db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (days, limit))
+            rows = cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["date_of_decision"] = str(d["date_of_decision"]) if d["date_of_decision"] else None
+        d["date_uploaded"] = str(d["date_uploaded"]) if d["date_uploaded"] else None
+        out.append(d)
+    return out
+
+
+@mcp.tool()
+def get_aptel_fulltext(
+    identifier: str,
+    max_chars: int = 50_000,
+    offset: int = 0,
+) -> dict:
+    """
+    Return ONLY the full extracted text of one APTEL judgement, with no
+    other record fields — for reading the operative reasoning verbatim.
+
+    APTEL judgements run long, so the full text can be large. This tool
+    returns a single slice of `max_chars` starting at `offset`, and tells
+    you whether more remains, so a long judgement can be paged through in
+    successive calls (offset = previous offset + max_chars) instead of
+    overflowing the response in one shot.
+
+    Prefer this over get_aptel_order when the user wants the actual text
+    of a judgement rather than its metadata. If you only have a
+    description and not an identifier, call search_aptel_orders first to
+    get the id or petition number, then call this.
+
+    Args:
+        identifier: The judgement id (the scraper's hash) or the
+            appeal/petition number.
+        max_chars: Maximum characters to return in this call
+            (default 50,000). Lower it if the response is too large for
+            the client.
+        offset: Character position to start from (default 0). To read the
+            next slice, pass the `next_offset` returned by the prior call.
+
+    Returns a dict with:
+        found        — whether a matching judgement exists.
+        has_fulltext — whether stored text is present (false means the PDF
+                       was scanned/image-only or extraction failed; use
+                       pdf_url to read the source).
+        id, petition_no, cause_title, pdf_url — minimal identifying fields.
+        total_chars  — length of the complete stored text.
+        offset, returned_chars — what this slice covers.
+        truncated    — true if text remains beyond this slice.
+        next_offset  — where to start the next call (null if none remain).
+        text         — the requested slice of full text ('' if none).
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive.")
+    if offset < 0:
+        raise ValueError("offset must be >= 0.")
+
+    sql = """
+        select id, petition_no, cause_title, pdf_url, pdf_fulltext
+        from aptel_orders
+        where id = %s or petition_no = %s
+        limit 1
+    """
+    with _db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (identifier, identifier))
+            row = cur.fetchone()
+
+    if not row:
+        return {
+            "found": False,
+            "has_fulltext": False,
+            "identifier": identifier,
+            "text": "",
+            "note": "No APTEL judgement matches that id or petition number.",
+        }
+
+    r = dict(row)
+    full = r.get("pdf_fulltext") or ""
+    total = len(full)
+    base = {
+        "found": True,
+        "has_fulltext": total > 0,
+        "id": r["id"],
+        "petition_no": r["petition_no"],
+        "cause_title": r["cause_title"],
+        "pdf_url": r["pdf_url"],
+        "total_chars": total,
+    }
+
+    if total == 0:
+        return base | {
+            "offset": 0,
+            "returned_chars": 0,
+            "truncated": False,
+            "next_offset": None,
+            "text": "",
+            "note": ("No stored full text — the PDF was likely scanned/"
+                     "image-only or beyond the extraction page cap. "
+                     "Open pdf_url to read the source."),
+        }
+
+    if offset >= total:
+        return base | {
+            "offset": offset,
+            "returned_chars": 0,
+            "truncated": False,
+            "next_offset": None,
+            "text": "",
+            "note": f"offset {offset} is past end of text ({total} chars).",
+        }
+
+    end = min(offset + max_chars, total)
+    slice_text = full[offset:end]
+    more = end < total
+    return base | {
+        "offset": offset,
+        "returned_chars": len(slice_text),
+        "truncated": more,
+        "next_offset": end if more else None,
+        "text": slice_text,
+    }
 
 
 if __name__ == "__main__":
