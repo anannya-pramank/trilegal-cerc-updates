@@ -82,6 +82,55 @@ def parse_cerc_date(value):
     return None
 
 
+def _parse_orders_table(html: str) -> list:
+    """Layout-tolerant version of cs.scrape_orders' parsing.
+
+    CERC changed the archive table over the years:
+      * older pages (e.g. 2016): 5 columns, header 'Pet. No.'
+            Pet. No. | Subject | Date of Order | Date of posting | Category
+      * newer pages (2020+):     6 columns, header 'Petition No.'
+            Sl.No. | Petition No. | Subject | Date of Order | Date of posting | Category
+
+    The daily scraper's parser is hardwired to the new layout (table found by
+    'Petition No.', cells[2] = subject, len(cells) >= 6) and returns zero rows
+    on old pages. Here we instead anchor on the one invariant — the Subject
+    cell contains the PDF link — and map neighbouring cells relative to it:
+    petition is the cell before, dates and category the cells after. Works for
+    both layouts without knowing which year the format flipped.
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    target = next((t for t in soup.find_all("table")
+                   if "Petition No." in t.get_text() or "Pet. No." in t.get_text()),
+                  None)
+    if not target:
+        return []
+
+    results = []
+    for tr in target.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 4:
+            continue
+        idx, pdf_href = None, ""
+        for i, c in enumerate(cells):
+            a = c.find("a", href=True)
+            if a and a["href"].strip().lower().endswith(".pdf"):
+                idx, pdf_href = i, a["href"].strip()
+                break
+        # Need a petition cell before the subject and at least two date cells after.
+        if idx is None or idx == 0 or len(cells) < idx + 3:
+            continue
+        results.append({
+            "petition_no": cs.clean(cells[idx - 1]),
+            "subject":     cs.clean(cells[idx]),
+            "date_order":  cs.clean(cells[idx + 1]),
+            "date_posted": cs.clean(cells[idx + 2]),
+            "category":    cs.clean(cells[idx + 3]) if len(cells) > idx + 3 else "",
+            "pdf_url":     cs.absolute_url(pdf_href),
+        })
+    return results
+
+
 def scrape_orders_for_year(year: int) -> list:
     """List all orders on the year's archive page (recent_orders<year>.html),
     or the live page for the current year. Fails loudly if the page/table is
@@ -91,10 +140,13 @@ def scrape_orders_for_year(year: int) -> list:
         os.environ.pop("CERC_ORDERS_YEAR", None)
     else:
         os.environ["CERC_ORDERS_YEAR"] = str(year)
-    rows = cs.scrape_orders()
+    url = cs.resolve_orders_url()
+    print(f"  Using orders page: {url}")
+    html = cs.fetch(url)
+    rows = _parse_orders_table(html)
     if not rows:
         sys.exit(f"No orders parsed for {year} — archive page missing or layout "
-                 f"changed. Check {cs.resolve_orders_url()} in a browser.")
+                 f"changed beyond known variants. Check {url} in a browser.")
     for r in rows:
         r["id"] = cs.make_id(r["pdf_url"])
     return rows
