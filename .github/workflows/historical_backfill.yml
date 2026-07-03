@@ -1,0 +1,102 @@
+name: Historical Backfill (CERC / APTEL)
+
+# Manual only. Dispatches ONE workflow run that walks a range of years for
+# either corpus, one job per year, sequentially (max-parallel: 1) so neither
+# cercind nor aptel gets hammered from parallel runners.
+#
+# Both loaders are idempotent (upsert on id = sha1(pdf_url)[:16], existing ids
+# skipped up front, batch commits) and take --deadline-minutes so a job exits
+# CLEANLY before GitHub's 6-hour kill. If a year is somehow too big for one
+# job, just re-dispatch that year — it resumes where it stopped.
+#
+# Recommended first dispatch: source=cerc, start=end=2025, limit=5 to validate
+# the whole path, then go wide.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Which corpus to backfill'
+        required: true
+        type: choice
+        options: [cerc, aptel]
+      start_year:
+        description: 'First year (inclusive)'
+        required: true
+        default: '2016'
+      end_year:
+        description: 'Last year (inclusive)'
+        required: true
+        default: '2025'
+      limit:
+        description: 'Per-year cap on orders (0 = all) — use for smoke tests'
+        required: true
+        default: '0'
+      dry_run:
+        description: 'Scrape listings + report only, write nothing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: historical-backfill-${{ inputs.source }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      years: ${{ steps.gen.outputs.years }}
+    steps:
+      - id: gen
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          start = int("${{ inputs.start_year }}")
+          end = int("${{ inputs.end_year }}")
+          years = list(range(start, end + 1))
+          print("Planned years:", years)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("years=" + json.dumps(years) + "\n")
+          EOF
+
+  backfill:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350            # hard backstop just under GitHub's 6h cap
+    strategy:
+      matrix:
+        year: ${{ fromJson(needs.plan.outputs.years) }}
+      max-parallel: 1               # be polite; a killed/failed year is re-runnable
+      fail-fast: false              # one bad year must not cancel the rest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-minilm-l6-v2   # same key as scrape.yml / aptel_backfill.yml — shared cache
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Backfill ${{ inputs.source }} ${{ matrix.year }}
+        env:
+          PYTHONUNBUFFERED: '1'
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          SCRIPT="cerc_cold_load.py"
+          [ "${{ inputs.source }}" = "aptel" ] && SCRIPT="aptel_cold_load.py"
+          ARGS="--year ${{ matrix.year }} --deadline-minutes 320"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ inputs.limit }}" != "0" ] && ARGS="$ARGS --limit ${{ inputs.limit }}"
+          echo "Running: python $SCRIPT $ARGS"
+          python "$SCRIPT" $ARGS
