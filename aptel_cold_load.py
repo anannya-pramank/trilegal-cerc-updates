@@ -173,7 +173,11 @@ def pdf_to_text(content: bytes, max_pages: int) -> str:
         import pymupdf4llm
         doc = fitz.open(stream=content, filetype="pdf")
         pages = list(range(min(len(doc), max_pages)))
-        md = pymupdf4llm.to_markdown(doc, pages=pages, show_progress=False)
+        # use_ocr=False: same fix as cerc_scraper — this pymupdf4llm version
+        # defaults to OCR-ing EVERY page, which is brutal on 200-page judgments.
+        # APTEL PDFs carry an embedded text layer, so read it directly.
+        md = pymupdf4llm.to_markdown(doc, pages=pages, show_progress=False,
+                                     use_ocr=False)
         if md and md.strip():
             return md.strip()
     except Exception as e:
@@ -342,6 +346,10 @@ def main():
                     help="Per-PDF page cap (APTEL judgments run long).")
     ap.add_argument("--request-delay", type=float, default=1.0, help="Seconds between PDF fetches.")
     ap.add_argument("--batch", type=int, default=20, help="Rows per commit.")
+    ap.add_argument("--deadline-minutes", type=int, default=0,
+                    help="Soft wall-clock cap: stop cleanly (flush + exit 0) after N "
+                         "minutes so GitHub's 6h job kill never hits mid-batch. "
+                         "0 = no deadline. Re-running resumes where this left off.")
     ap.add_argument("--fulltext-dir", default="aptel/fulltext")
     args = ap.parse_args()
 
@@ -400,7 +408,12 @@ def main():
         batch = []
 
     try:
+        started = time.monotonic()
         for i, r in enumerate(todo, 1):
+            if args.deadline_minutes and (time.monotonic() - started) > args.deadline_minutes * 60:
+                print(f"\n[deadline] {args.deadline_minutes} min reached after {i-1}/{len(todo)} "
+                      f"orders — flushing and exiting cleanly. Re-run to resume.")
+                break
             print(f"[{i}/{len(todo)}] {r['petition_no'][:70]}")
             try:
                 resp = session.get(r["pdf_url"], timeout=60, verify=False)
