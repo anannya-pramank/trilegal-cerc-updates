@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import numpy as np
 
-SUMMARY_VERSION = "extractive-v6"
+SUMMARY_VERSION = "extractive-v7"
 
 # Whitelisted per-table config — table names are NEVER interpolated from
 # caller input, mirroring the _GREPPABLE pattern in the servers.
@@ -143,11 +143,20 @@ def strip_head(paras: list[tuple[int | None, str]]) -> list[tuple[int | None, st
     return [p for p in paras if not HEAD_NOISE.match(p[1])]
 
 
+def _is_furniture(text: str) -> bool:
+    """Markdown headings and letterhead lines — never substantive."""
+    bare = text.lstrip("#*_ ").rstrip("*_ ")
+    if text.lstrip().startswith("#"):
+        return True
+    return len(bare) < 90 and bare.upper() == bare and any(c.isalpha() for c in bare)
+
+
 def drop_noise(paras: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
     """Remove address entries, table fragments, and PDF-extraction artifacts
     (pymupdf4llm picture-text blocks / page headers) that survived head-strip."""
     return [(n, t) for n, t in paras
             if not _is_address(t) and not _is_table(t)
+            and not _is_furniture(t)
             and "<!--" not in t
             and not re.search(r"\bPage \d+\s*(of \d+)?\s*$", t)]
 
