@@ -1,0 +1,208 @@
+"""
+extractive_summary.py — API-free order digests for cerc_mcp.py / aptel_mcp.py.
+
+Sits in the SAME directory as the two MCP server files. No new dependencies:
+uses the psycopg2 + sentence-transformers already required by the servers,
+and reuses the server's lazily-loaded MiniLM instance.
+
+Schema-matched to the real tables:
+    cerc_orders  (id text hash, pdf_fulltext, date_order,       ...)
+    aptel_orders (id text hash, pdf_fulltext, date_of_decision, ...)
+
+Migration (run once per table in Supabase SQL editor):
+
+    alter table cerc_orders
+      add column if not exists summary text,
+      add column if not exists summary_model text,
+      add column if not exists summarized_at timestamptz;
+
+    alter table aptel_orders
+      add column if not exists summary text,
+      add column if not exists summary_model text,
+      add column if not exists summarized_at timestamptz;
+"""
+
+from __future__ import annotations
+
+import re
+import numpy as np
+
+SUMMARY_VERSION = "extractive-v1"
+
+# Whitelisted per-table config — table names are NEVER interpolated from
+# caller input, mirroring the _GREPPABLE pattern in the servers.
+TABLES = {
+    "cerc_orders":  {"text_col": "pdf_fulltext"},
+    "aptel_orders": {"text_col": "pdf_fulltext"},
+}
+
+# ---------------------------------------------------------------------------
+# 1. Paragraph splitting and boilerplate stripping
+# ---------------------------------------------------------------------------
+
+HEAD_NOISE = re.compile(
+    r"^\s*(coram|in the matter of|and\s+in the matter of|petitioner|respondent"
+    r"|appellant|versus|vs\.?|for the (petitioner|respondent|appellant)s?"
+    r"|counsel|advocate|present:|parties present|date of (hearing|order|decision))",
+    re.IGNORECASE,
+)
+
+BODY_START = re.compile(
+    r"^\s*(ORDER|JUDGMENT|JUDGEMENT|DAILY ORDER)\s*$|^\s*1\s*[\.\)]\s+\S"
+)
+
+# Operative / high-signal language in CERC orders and APTEL judgements.
+OPERATIVE = re.compile(
+    r"(condon\w*|we direct|is (hereby )?(disposed|allowed|dismissed|rejected|remanded)"
+    r"|hereby|held that|we hold|it is clarified|accordingly|liberty to"
+    r"|true[- ]?up|carrying cost|prudence check|delay of \d+\s*(days|months)"
+    r"|impugned order|set aside|in view of the above|summary of (our )?findings"
+    r"|change in law|capital cost|annual fixed charge|tariff (is|shall))",
+    re.IGNORECASE,
+)
+
+PARA_NUM = re.compile(r"^\s*(\d{1,3})\s*[\.\)]\s+")
+
+
+def split_paragraphs(fulltext: str) -> list[tuple[int | None, str]]:
+    """Split on blank lines; drop tiny fragments (page numbers, headers)."""
+    raw = re.split(r"\n\s*\n", fulltext)
+    paras: list[tuple[int | None, str]] = []
+    for block in raw:
+        block = re.sub(r"\s+", " ", block).strip()
+        if len(block) < 40:
+            continue
+        m = PARA_NUM.match(block)
+        paras.append((int(m.group(1)) if m else None, block))
+    return paras
+
+
+def strip_head(paras: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+    """Drop cause title / coram / appearances before the substantive body."""
+    for i, (num, text) in enumerate(paras):
+        if BODY_START.match(text) or num == 1:
+            return paras[i:]
+    return [p for p in paras if not HEAD_NOISE.match(p[1])]
+
+
+# ---------------------------------------------------------------------------
+# 2. Ranking: centrality + operative bonus + tail bias (+ optional query bias)
+# ---------------------------------------------------------------------------
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    a = a / (np.linalg.norm(a, axis=-1, keepdims=True) + 1e-9)
+    b = b / (np.linalg.norm(b, axis=-1, keepdims=True) + 1e-9)
+    return a @ b.T
+
+
+def rank_paragraphs(
+    paras: list[tuple[int | None, str]],
+    model,
+    query: str | None = None,
+    top_k: int = 8,
+) -> list[tuple[int | None, str]]:
+    texts = [t for _, t in paras]
+    emb = np.asarray(model.encode(texts, batch_size=32, show_progress_bar=False))
+
+    centroid = emb.mean(axis=0, keepdims=True)
+    scores = _cosine(emb, centroid).ravel()
+
+    if query:
+        q = np.asarray(model.encode([query]))
+        scores = 0.5 * scores + 0.5 * _cosine(emb, q).ravel()
+
+    n = len(paras)
+    for i, (_, text) in enumerate(paras):
+        if OPERATIVE.search(text):
+            scores[i] += 0.15
+        if i >= n - max(3, n // 10):
+            scores[i] += 0.10   # directions / disposal live at the tail
+        if i == 0:
+            scores[i] += 0.05   # opening para usually states the issue
+
+    keep = sorted(np.argsort(scores)[::-1][:top_k])
+    return [paras[i] for i in keep]
+
+
+# ---------------------------------------------------------------------------
+# 3. Digest assembly
+# ---------------------------------------------------------------------------
+
+def build_digest(fulltext: str, model, query: str | None = None,
+                 max_chars: int = 3500) -> str:
+    paras = strip_head(split_paragraphs(fulltext))
+    if not paras:
+        return fulltext[:max_chars]
+
+    picked = rank_paragraphs(paras, model, query=query)
+
+    out, used = [], 0
+    for num, text in picked:
+        label = f"[para {num}] " if num is not None else "[¶] "
+        entry = label + text
+        if used + len(entry) > max_chars:
+            entry = entry[: max_chars - used].rsplit(" ", 1)[0] + " …"
+        out.append(entry)
+        used += len(entry)
+        if used >= max_chars:
+            break
+    return "\n\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# 4. Cache-through accessor — called by the summarize_order MCP tool
+# ---------------------------------------------------------------------------
+
+def get_or_create_summary(
+    conn,
+    table: str,
+    identifier: str,          # id hash OR petition_no (matches get_order)
+    model_loader,             # the server's _get_model
+    query: str | None = None,
+    force_refresh: bool = False,
+) -> dict:
+    """Return {"id", "petition_no", "summary", "cached"}.
+
+    Generic digests are cached in the summary column; query-biased digests
+    are computed fresh (they're question-specific) but MiniLM is local so
+    that's cheap. New rows loaded by the GitHub backfill are summarized
+    lazily on first access — no loader change required.
+    """
+    if table not in TABLES:
+        raise ValueError(f"table must be one of {sorted(TABLES)}")
+    text_col = TABLES[table]["text_col"]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"select id, petition_no, summary, summary_model, {text_col} "
+            f"from {table} where id = %s or petition_no = %s limit 1",
+            (identifier, identifier),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"id": None, "summary": None, "error": "order not found"}
+
+        oid, petition_no, cached_summary, cached_ver, fulltext = row
+
+        if (cached_summary and cached_ver == SUMMARY_VERSION
+                and not force_refresh and query is None):
+            return {"id": oid, "petition_no": petition_no,
+                    "summary": cached_summary, "cached": True}
+
+        if not fulltext:
+            return {"id": oid, "petition_no": petition_no, "summary": None,
+                    "error": f"{text_col} is empty for this order — "
+                             f"use get_order / the PDF instead"}
+
+        digest = build_digest(fulltext, model_loader(), query=query)
+
+        if query is None:
+            cur.execute(
+                f"update {table} set summary = %s, summary_model = %s, "
+                f"summarized_at = now() where id = %s",
+                (digest, SUMMARY_VERSION, oid),
+            )
+            conn.commit()
+
+    return {"id": oid, "petition_no": petition_no,
+            "summary": digest, "cached": False}
