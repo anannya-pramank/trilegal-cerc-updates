@@ -29,6 +29,7 @@ import sys
 import time
 
 import psycopg2
+from psycopg2.extras import execute_values
 
 from extractive_summary import SUMMARY_VERSION, TABLES, build_digest
 
@@ -103,19 +104,17 @@ def run(table: str, batch: int, limit: int | None) -> None:
 
         if updates:
             with conn.cursor() as cur:
-                values_sql = ",".join(
-                    cur.mogrify("(%s, %s)", u).decode() for u in updates
-                )
-                cur.execute(
+                execute_values(
+                    cur,
                     f"""
                     update {table} t
                     set summary = d.summary,
-                        summary_model = %s,
+                        summary_model = d.model,
                         summarized_at = now()
-                    from (values {values_sql}) as d(id, summary)
+                    from (values %s) as d(id, summary, model)
                     where t.id = d.id
                     """,
-                    (SUMMARY_VERSION,),
+                    [(oid, digest, SUMMARY_VERSION) for oid, digest in updates],
                 )
             conn.commit()
 
