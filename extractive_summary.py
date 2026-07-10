@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import numpy as np
 
-SUMMARY_VERSION = "extractive-v5"
+SUMMARY_VERSION = "extractive-v6"
 
 # Whitelisted per-table config — table names are NEVER interpolated from
 # caller input, mirroring the _GREPPABLE pattern in the servers.
@@ -67,14 +67,25 @@ PARA_NUM = re.compile(r"^\s*(\d{1,3})\s*[\.\)]\s+")
 # These are numbered like body paragraphs, so PARA_NUM alone can't exclude
 # them — detect by address vocabulary and 6-digit PIN.
 ADDRESS_LIKE = re.compile(
-    r"\b\d{6}\b|"                                   # PIN code
+    r"\b\d{3}\s?\d{3}\b|"                           # PIN code, incl. "500 063"
     r"\b(Bhawan|Bhavan|Complex|Marg|Nagar|Sector[- ]\d+|Vidyut|Shakti"
     r"|House|Road,|Place,|District)\b",
     re.IGNORECASE,
 )
 
+# Bare cause-title entries: "4. Central Power Distribution Company of A.P
+# Limited," — numbered, short, org suffix near the end, trailing comma or
+# nothing after it. Tolerates abbreviation dots (A.P, M.P).
+ORG_LINE = re.compile(
+    r"^\s*\d{1,2}\s*[\.\)]\s+[A-Z].{5,140}?"
+    r"\b(Limited|Ltd\.?|Corporation|Company|Board|Nigam|Utility|Utilities)\b"
+    r"[^a-z]{0,10},?\s*$"
+)
+
 
 def _is_address(text: str) -> bool:
+    if ORG_LINE.match(text):
+        return True
     return (len(text) < 350
             and ADDRESS_LIKE.search(text) is not None
             and OPERATIVE.search(text) is None)
@@ -108,6 +119,8 @@ def split_paragraphs(fulltext: str) -> list[tuple[int | None, str]]:
     raw = re.split(r"\n\s*\n", fulltext)
     paras: list[tuple[int | None, str]] = []
     for block in raw:
+        # strip pymupdf4llm inline markup (<mark>, <sup>, <br>, ...)
+        block = re.sub(r"</?[a-zA-Z][^>]*>", " ", block)
         block = re.sub(r"\s+", " ", block).strip()
         if len(block) < 40:
             continue
@@ -209,7 +222,9 @@ def rank_paragraphs(
 # ---------------------------------------------------------------------------
 
 def _norm_prefix(text: str, n: int = 120) -> str:
-    return re.sub(r"[^a-z0-9]", "", text.lower())[:n]
+    # digit-insensitive: corrigendum lines ("table in paragraph 78/79/105 is
+    # substituted...") differ only in their numbers and should collapse
+    return re.sub(r"[^a-z]", "", text.lower())[:n]
 
 
 def build_digest(fulltext: str, model, query: str | None = None,
