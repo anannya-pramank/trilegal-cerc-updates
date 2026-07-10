@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import numpy as np
 
-SUMMARY_VERSION = "extractive-v1"
+SUMMARY_VERSION = "extractive-v2"
 
 # Whitelisted per-table config — table names are NEVER interpolated from
 # caller input, mirroring the _GREPPABLE pattern in the servers.
@@ -63,6 +63,36 @@ OPERATIVE = re.compile(
 
 PARA_NUM = re.compile(r"^\s*(\d{1,3})\s*[\.\)]\s+")
 
+# Cause-title respondent/petitioner entries: org name + address + PIN code.
+# These are numbered like body paragraphs, so PARA_NUM alone can't exclude
+# them — detect by address vocabulary and 6-digit PIN.
+ADDRESS_LIKE = re.compile(
+    r"\b\d{6}\b|"                                   # PIN code
+    r"\b(Bhawan|Bhavan|Complex|Marg|Nagar|Sector[- ]\d+|Vidyut|Shakti"
+    r"|House|Road,|Place,|District)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_address(text: str) -> bool:
+    return (len(text) < 350
+            and ADDRESS_LIKE.search(text) is not None
+            and OPERATIVE.search(text) is None)
+
+
+# pymupdf4llm renders quoted regulations as markdown emphasis/headings and
+# tables as pipe rows. Quoted law is not the Commission's finding; tables
+# don't survive digest truncation usefully.
+QUOTED_START = re.compile(r'^\s*[_#>*]|^\s*[“"]')
+
+
+def _is_table(text: str) -> bool:
+    return text.count("|") >= 4
+
+
+def _is_quoted(text: str) -> bool:
+    return bool(QUOTED_START.match(text))
+
 
 def split_paragraphs(fulltext: str) -> list[tuple[int | None, str]]:
     """Split on blank lines; drop tiny fragments (page numbers, headers)."""
@@ -78,16 +108,48 @@ def split_paragraphs(fulltext: str) -> list[tuple[int | None, str]]:
 
 
 def strip_head(paras: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
-    """Drop cause title / coram / appearances before the substantive body."""
+    """Drop cause title / coram / appearances before the substantive body.
+
+    The respondent list in the cause title is itself numbered 1, 2, 3...,
+    so 'first paragraph numbered 1' only marks the body start if that
+    paragraph does NOT look like an address entry."""
     for i, (num, text) in enumerate(paras):
+        if _is_address(text):
+            continue
         if BODY_START.match(text) or num == 1:
             return paras[i:]
     return [p for p in paras if not HEAD_NOISE.match(p[1])]
 
 
+def drop_noise(paras: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+    """Remove address entries and table fragments that survived head-strip."""
+    return [(n, t) for n, t in paras
+            if not _is_address(t) and not _is_table(t)]
+
+
 # ---------------------------------------------------------------------------
 # 2. Ranking: centrality + operative bonus + tail bias (+ optional query bias)
 # ---------------------------------------------------------------------------
+
+# Long tariff orders can run to hundreds of paragraphs; embedding all of them
+# just to keep 8 dominates runtime. Pre-shortlist to the paragraphs that could
+# plausibly win anyway: the opening, operative-language hits, and the tail.
+MAX_RANK_PARAS = 80
+
+
+def _shortlist(paras: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+    if len(paras) <= MAX_RANK_PARAS:
+        return paras
+    idx: set[int] = set(range(5))                              # opening
+    idx |= set(range(max(0, len(paras) - 30), len(paras)))     # tail
+    for i, (_, text) in enumerate(paras):
+        if OPERATIVE.search(text):
+            idx.add(i)
+    keep = sorted(idx)
+    if len(keep) > MAX_RANK_PARAS:                             # trim the middle
+        half = MAX_RANK_PARAS // 2
+        keep = keep[:half] + keep[-half:]
+    return [paras[i] for i in keep]
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a = a / (np.linalg.norm(a, axis=-1, keepdims=True) + 1e-9)
@@ -101,6 +163,7 @@ def rank_paragraphs(
     query: str | None = None,
     top_k: int = 8,
 ) -> list[tuple[int | None, str]]:
+    paras = _shortlist(paras)
     texts = [t for _, t in paras]
     emb = np.asarray(model.encode(texts, batch_size=32, show_progress_bar=False))
 
@@ -119,6 +182,9 @@ def rank_paragraphs(
             scores[i] += 0.10   # directions / disposal live at the tail
         if i == 0:
             scores[i] += 0.05   # opening para usually states the issue
+        if _is_quoted(text):
+            scores[i] -= 0.25   # quoted regulations/extracts are context,
+                                # not the Commission's own finding
 
     keep = sorted(np.argsort(scores)[::-1][:top_k])
     return [paras[i] for i in keep]
@@ -130,7 +196,7 @@ def rank_paragraphs(
 
 def build_digest(fulltext: str, model, query: str | None = None,
                  max_chars: int = 3500) -> str:
-    paras = strip_head(split_paragraphs(fulltext))
+    paras = drop_noise(strip_head(split_paragraphs(fulltext)))
     if not paras:
         return fulltext[:max_chars]
 
