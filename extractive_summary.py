@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import numpy as np
 
-SUMMARY_VERSION = "extractive-v2"
+SUMMARY_VERSION = "extractive-v3"
 
 # Whitelisted per-table config — table names are NEVER interpolated from
 # caller input, mirroring the _GREPPABLE pattern in the servers.
@@ -81,9 +81,18 @@ def _is_address(text: str) -> bool:
 
 
 # pymupdf4llm renders quoted regulations as markdown emphasis/headings and
-# tables as pipe rows. Quoted law is not the Commission's finding; tables
-# don't survive digest truncation usefully.
-QUOTED_START = re.compile(r'^\s*[_#>*]|^\s*[“"]')
+# tables as pipe rows — sometimes behind a leading list bullet ("- _a) ..._").
+# Quoted law is not the Commission's finding; tables don't survive digest
+# truncation usefully.
+QUOTED_START = re.compile(r'^\s*[-•]?\s*[_#>*“"]')
+
+# Quoted prayer lists ("(a) Admit the petition...", "(ii) Allow the
+# petitioner...") are the petitioner's ask, not the Commission's holding.
+PRAYER_LINE = re.compile(
+    r'^\s*[-•]?\s*\(?([a-z]|i{1,3}v?|vi{0,3}|x?i{0,3})\)\s*'
+    r'(admit|allow|grant|condone|permit|direct|approve|declare|pass such)',
+    re.IGNORECASE,
+)
 
 
 def _is_table(text: str) -> bool:
@@ -185,6 +194,8 @@ def rank_paragraphs(
         if _is_quoted(text):
             scores[i] -= 0.25   # quoted regulations/extracts are context,
                                 # not the Commission's own finding
+        if PRAYER_LINE.match(text):
+            scores[i] -= 0.25   # petitioner's prayers, not the holding
 
     keep = sorted(np.argsort(scores)[::-1][:top_k])
     return [paras[i] for i in keep]
