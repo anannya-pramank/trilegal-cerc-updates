@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import numpy as np
 
-SUMMARY_VERSION = "extractive-v3"
+SUMMARY_VERSION = "extractive-v4"
 
 # Whitelisted per-table config — table names are NEVER interpolated from
 # caller input, mirroring the _GREPPABLE pattern in the servers.
@@ -89,7 +89,7 @@ QUOTED_START = re.compile(r'^\s*[-•]?\s*[_#>*“"]')
 # Quoted prayer lists ("(a) Admit the petition...", "(ii) Allow the
 # petitioner...") are the petitioner's ask, not the Commission's holding.
 PRAYER_LINE = re.compile(
-    r'^\s*[-•]?\s*\(?([a-z]|i{1,3}v?|vi{0,3}|x?i{0,3})\)\s*'
+    r'^\s*[-•]?\s*\(?([a-z]|i{1,3}v?|vi{0,3}|x?i{0,3})[\.\)]\s*'
     r'(admit|allow|grant|condone|permit|direct|approve|declare|pass such)',
     re.IGNORECASE,
 )
@@ -205,6 +205,10 @@ def rank_paragraphs(
 # 3. Digest assembly
 # ---------------------------------------------------------------------------
 
+def _norm_prefix(text: str, n: int = 120) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())[:n]
+
+
 def build_digest(fulltext: str, model, query: str | None = None,
                  max_chars: int = 3500) -> str:
     paras = drop_noise(strip_head(split_paragraphs(fulltext)))
@@ -214,7 +218,15 @@ def build_digest(fulltext: str, model, query: str | None = None,
     picked = rank_paragraphs(paras, model, query=query)
 
     out, used = [], 0
+    seen_prefixes: set[str] = set()
     for num, text in picked:
+        # Tagged petitions (e.g. "722/MP/2020 & 723/MP/2020") repeat their
+        # caption verbatim; keep only the first of any near-identical pair.
+        prefix = _norm_prefix(text)
+        if prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+
         label = f"[para {num}] " if num is not None else "[¶] "
         entry = label + text
         if used + len(entry) > max_chars:
