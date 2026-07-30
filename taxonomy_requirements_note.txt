@@ -1,0 +1,32 @@
+Taxonomy auto-tagger — dependency & Actions notes
+==================================================
+
+NEW python deps beyond the existing repo requirements (torch + transformers
+already come in via sentence-transformers; only these are genuinely new):
+
+    transformers>=4.13     # zero-shot pipeline (already present via sentence-transformers)
+    sentencepiece          # REQUIRED: deberta-v3 tokenizer is SentencePiece-based
+    protobuf               # some transformers versions need this for the spm tokenizer
+
+    # optional, only if you ever run --backend llm:
+    # google-generativeai   (Gemini)   or   anthropic   (Claude)
+
+No API key is needed for the default (--backend local).
+
+GitHub Actions: cache the HF hub so the ~370MB model downloads once.
+    - name: Cache HF models
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: hf-zeroshot-deberta-v3-base-c
+
+Model licensing (relevant for a law firm):
+    MoritzLaurer/deberta-v3-base-zeroshot-v2.0-c
+    The "-c" build is trained ONLY on commercially-friendly data. The non-"-c"
+    builds score a little higher but include some non-commercially-licensed
+    training data. Foundation model (microsoft/deberta-v3) is MIT.
+
+Speed on CPU (no GPU in Actions):
+    base  model  ~ a few seconds/doc   (default)
+    large model  ~ 3x that             (--local-model ...deberta-v3-large-zeroshot-v2.0-c)
+    Use --deadline-minutes 320 in Actions; --skip-tagged resumes.
