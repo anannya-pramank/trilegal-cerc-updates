@@ -1,0 +1,140 @@
+name: Tag Documents (CERC / APTEL)
+
+# Two ways this runs:
+#
+#   * schedule (daily, 20 min after the scraper's 02:30 UTC run): INCREMENT mode.
+#     Tags both corpora with --skip-tagged, so it only touches the 1-2 docs the
+#     scraper just loaded. ~30s per source once the model is cached. This is the
+#     steady state.
+#
+#   * workflow_dispatch: BACKFILL mode. Run the one-time sweep of the ~5k
+#     historical docs here if you don't want to run it locally. Idempotent +
+#     resumable (--skip-tagged unless you tick retag_all), and each job exits
+#     cleanly at --deadline-minutes so the 6h cap is never a hard failure —
+#     re-dispatch to continue.
+#
+# No API key needed: the default backend is the local deberta-v3 zero-shot
+# classifier. DATABASE_URL is the only secret required (already set for scrape.yml).
+
+on:
+  schedule:
+    - cron: '50 2 * * *'          # 02:50 UTC (08:20 IST) — 20 min after scrape.yml
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Corpus to tag'
+        type: choice
+        options: [both, cerc, aptel]
+        default: both
+      backend:
+        description: 'Classifier backend (local = no API key)'
+        type: choice
+        options: [local, embed, llm]
+        default: local
+      local_model:
+        description: 'Zero-shot model (base = fast, large = ~3x slower, more accurate)'
+        type: choice
+        options:
+          - MoritzLaurer/deberta-v3-base-zeroshot-v2.0-c
+          - MoritzLaurer/deberta-v3-large-zeroshot-v2.0-c
+        default: MoritzLaurer/deberta-v3-base-zeroshot-v2.0-c
+      keep_threshold:
+        description: 'Multi-label keep threshold (0.50 looser … 0.65 stricter)'
+        default: '0.55'
+      limit:
+        description: 'Per-source doc cap (0 = all) — use for smoke tests'
+        default: '0'
+      retag_all:
+        description: 'Re-tag everything (untick keeps --skip-tagged / resumable)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read                   # tags live in Supabase; nothing is committed
+
+concurrency:
+  group: tag-documents-${{ inputs.source || 'both' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      sources: ${{ steps.gen.outputs.sources }}
+    steps:
+      - id: gen
+        run: |
+          SRC="${{ inputs.source || 'both' }}"
+          if [ "$SRC" = "both" ]; then
+            echo 'sources=["cerc","aptel"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "sources=[\"$SRC\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  tag:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350           # backstop just under the 6h cap; --deadline-minutes exits first
+    strategy:
+      matrix:
+        source: ${{ fromJson(needs.plan.outputs.sources) }}
+      max-parallel: 1              # one Supabase writer at a time; keep it calm
+      fail-fast: false             # a bad source must not cancel the other
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Cache zero-shot model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          # distinct from scrape.yml's MiniLM cache key: this caches the deberta
+          # zero-shot weights (~370MB base). Both live under ~/.cache/huggingface.
+          key: hf-zeroshot-deberta-v3-base-c
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch FIRST: smaller wheel, no CUDA, faster cold start.
+          # requirements.txt doesn't pin torch (it arrives via sentence-transformers),
+          # so installing it up front means the -r install below is satisfied and
+          # won't pull the heavier default build over it.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          # deberta-v3 tokenizer is SentencePiece-based:
+          pip install sentencepiece protobuf
+
+      - name: Tag ${{ matrix.source }}
+        env:
+          PYTHONUNBUFFERED: '1'
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # If you ever pick backend=llm, also add the relevant secret and uncomment:
+          # GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          [ -z "$DATABASE_URL" ] && { echo "No DATABASE_URL secret; nothing to tag."; exit 0; }
+
+          BACKEND="${{ inputs.backend || 'local' }}"
+          MODEL="${{ inputs.local_model || 'MoritzLaurer/deberta-v3-base-zeroshot-v2.0-c' }}"
+          KEEP="${{ inputs.keep_threshold || '0.55' }}"
+          LIMIT="${{ inputs.limit || '0' }}"
+
+          ARGS="--source ${{ matrix.source }} --backend $BACKEND --keep-threshold $KEEP --deadline-minutes 320"
+          [ "$BACKEND" = "local" ] && ARGS="$ARGS --local-model $MODEL"
+          [ "$LIMIT" != "0" ] && ARGS="$ARGS --limit $LIMIT"
+
+          # Scheduled runs and every dispatch except an explicit retag_all=true
+          # skip already-tagged docs. Scheduled event has no inputs -> retag_all
+          # is empty -> we skip-tagged (correct increment behaviour).
+          if [ "${{ inputs.retag_all }}" != "true" ]; then
+            ARGS="$ARGS --skip-tagged"
+          fi
+
+          echo "python tag_documents.py $ARGS"
+          python tag_documents.py $ARGS
