@@ -263,7 +263,7 @@ function buildFacets(){
   const forums=new Counter(), pts=new Counter(), appeals=new Counter(), tags=new Counter();
   for(const o of state.index){
     forums.add(o.forum); if(o.pt)pts.add(o.pt);
-    if(o.appeal && o.appeal!=="n/a")appeals.add(o.appeal);
+    if(o.appeal && o.appeal!=="n/a" && o.appeal!=="unknown")appeals.add(o.appeal);
     (o.tags||[]).forEach(t=>tags.add(t));
   }
   const wrap=$("#facets"); wrap.innerHTML="";
@@ -397,7 +397,7 @@ function rowFor(o){
   } else tl.appendChild(el("span","untagged","untagged"));
   tt.appendChild(tl); tr.appendChild(tt);
   const ap=el("td");
-  if(o.appeal&&o.appeal!=="n/a")ap.appendChild(el("span","badge b-"+o.appeal,label(o.appeal)));
+  if(o.appeal&&o.appeal!=="n/a"&&o.appeal!=="unknown")ap.appendChild(el("span","badge b-"+o.appeal,label(o.appeal)));
   tr.appendChild(ap);
   return tr;
 }
@@ -435,7 +435,7 @@ function paintDrawer(o){
     }
   }
 
-  if(o.appeal&&o.appeal.status&&o.appeal.status!=="n/a"){
+  if(o.appeal&&o.appeal.status&&o.appeal.status!=="n/a"&&o.appeal.status!=="unknown"){
     html+=`<h4>Appeal — ${esc(label(o.appeal.status))}</h4>`;
     if((o.appeal.chain||[]).length){
       html+=`<div class="chain">`;
@@ -535,7 +535,7 @@ function setTab(t){
 
 function label(s){return ({
   unappealed:"unappealed", affirmed:"affirmed", set_aside:"set aside",
-  remanded:"remanded", appealed_pending:"appeal pending",
+  remanded:"remanded", appealed_pending:"appeal pending", unknown:"—",
 }[s])||s;}
 function isSubjectFacet(f){f=(f||"").toLowerCase(); return f==="subject"||f.startsWith("facet_1");}
 function facetShort(f){if(!f)return""; f=String(f).toLowerCase();
