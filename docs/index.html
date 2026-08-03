@@ -270,9 +270,9 @@ function buildFacets(){
   wrap.appendChild(facetBlock("Forum","forum",forums,v=>v));
   wrap.appendChild(facetBlock("Appeal status","appeal",appeals,v=>label(v)));
   wrap.appendChild(facetBlock("Petition type","pt",pts,v=>v));
-  // subject-matter tags: only facet_1 codes, named via taxonomy, top by count
+  // subject-matter tags: only the subject facet, named via taxonomy, top by count
   const subj=new Counter();
-  tags.forEach((n,c)=>{ const nd=state.taxonomy[c]; if(nd&&nd.facet&&nd.facet.startsWith("facet_1"))subj.set(c,n); });
+  tags.forEach((n,c)=>{ if(isSubjectFacet((state.taxonomy[c]||{}).facet))subj.set(c,n); });
   wrap.appendChild(facetBlock("Subject matter","tags",subj,c=>(state.taxonomy[c]||{}).name||c,true));
 }
 
@@ -537,9 +537,13 @@ function label(s){return ({
   unappealed:"unappealed", affirmed:"affirmed", set_aside:"set aside",
   remanded:"remanded", appealed_pending:"appeal pending",
 }[s])||s;}
-function facetShort(f){if(!f)return""; if(f.startsWith("facet_1"))return"subject";
-  if(f.startsWith("facet_2"))return"instrument"; if(f.startsWith("facet_3"))return"pet.type";
-  if(f.startsWith("facet_4"))return"party"; if(f.startsWith("facet_5"))return"disposition"; return f;}
+function isSubjectFacet(f){f=(f||"").toLowerCase(); return f==="subject"||f.startsWith("facet_1");}
+function facetShort(f){if(!f)return""; f=String(f).toLowerCase();
+  if(f==="subject"||f.startsWith("facet_1"))return"subject";
+  if(f==="instrument"||f.startsWith("facet_2"))return"instrument";
+  if(f==="petition"||f.startsWith("facet_3"))return"pet.type";
+  if(f==="party"||f.startsWith("facet_4"))return"party";
+  if(f==="disposition"||f.startsWith("facet_5"))return"disposition"; return f;}
 function safe(s){return String(s).replace(/[^A-Za-z0-9_.-]/g,"_");}
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 class Counter extends Map{add(k){this.set(k,(this.get(k)||0)+1);}}
