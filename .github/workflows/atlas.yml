@@ -1,0 +1,59 @@
+name: Build Atlas site
+
+# Runs AFTER scrape.yml (02:30) and tag.yml (02:50): republishes the static
+# JSON the GitHub Pages site reads. Publishes whatever is currently tagged —
+# CERC coverage grows here automatically as tag.yml catches up, no edits needed.
+
+on:
+  schedule:
+    - cron: "20 3 * * *"        # 03:20 UTC, 30 min after tag.yml
+  workflow_dispatch:
+    inputs:
+      shards_only:
+        description: "Skip aggregates (faster; dashboard/issues won't refresh)"
+        type: boolean
+        default: false
+  # let tag.yml chain into this on completion if you add a dispatch there
+  repository_dispatch:
+    types: [atlas-build]
+
+permissions:
+  contents: write             # to commit docs/data back to the repo
+
+concurrency:
+  group: atlas-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install psycopg2-binary
+
+      - name: Export atlas JSON
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python export_atlas.py --out docs/data --tax-dir taxonomy \
+            ${{ inputs.shards_only && '--shards-only' || '' }}
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "atlas-bot"
+          git config user.email "atlas-bot@users.noreply.github.com"
+          git add docs/data
+          if git diff --cached --quiet; then
+            echo "No change in published data."
+          else
+            git commit -m "atlas: refresh published data ($(date -u +%F))"
+            git push
+          fi
