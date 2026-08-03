@@ -39,6 +39,11 @@ jobs:
       - name: Install deps
         run: pip install psycopg2-binary
 
+      - name: Build appeal linkage (CERC -> APTEL)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python build_appeal_links.py --read-disposition
+
       - name: Export atlas JSON
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
