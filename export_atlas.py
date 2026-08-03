@@ -178,6 +178,16 @@ def _normalize_order(row, forum):
 SOURCE_TO_FORUM = {"cerc": "CERC", "aptel": "APTEL"}
 
 
+def _norm_petition(pno):
+    """Canonical petition key, MUST match build_appeal_links.norm_petition:
+    '235 / MP / 2021' -> '235/mp/2021'. Used to join orders to appeal links."""
+    if not pno:
+        return None
+    s = re.sub(r"\s+", "", str(pno)).lower()
+    m = re.match(r"(\d+)/([a-z]{2,4})/(\d{4})", s)
+    return f"{m.group(1)}/{m.group(2)}/{m.group(3)}" if m else s
+
+
 def fetch_tags(cur):
     """doc_tags -> {(FORUM, doc_id): [ {facet, code, confidence, method} ]}.
 
@@ -206,7 +216,11 @@ def fetch_tags(cur):
 
 
 def fetch_appeal_links(cur):
-    """CERC petition_no -> APTEL appeal rows, best-effort from existing linkage."""
+    """CERC petition_no -> APTEL appeal rows from the materialized link table.
+
+    Returns (links, linkage_ready). linkage_ready is False when the table is
+    absent/empty, which tells _appeal_status not to claim 'unappealed'.
+    """
     links = defaultdict(list)
     try:
         cur.execute(
@@ -216,8 +230,15 @@ def fetch_appeal_links(cur):
         for cerc_no, aptel_id, disp in cur.fetchall():
             links[cerc_no].append({"aptel_id": str(aptel_id), "disposition": disp})
     except psycopg2.Error:
-        log("WARN: aptel_cerc_links absent; appeal badges will be 'unknown'")
-    return links
+        log("WARN: aptel_cerc_links absent; appeal posture shown as 'unknown' "
+            "until the linkage pass runs")
+        return links, False
+    ready = len(links) > 0
+    if not ready:
+        log("WARN: aptel_cerc_links empty; appeal posture shown as 'unknown'")
+    else:
+        log(f"appeal linkage: {len(links)} CERC orders with appeals on record")
+    return links, ready
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -280,7 +301,7 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
     orders = (fetch_orders(cur, APTEL_TABLE, "APTEL")
               + fetch_orders(cur, CERC_TABLE, "CERC"))
     tags = fetch_tags(cur)
-    appeal_links = fetch_appeal_links(cur)
+    appeal_links, linkage_ready = fetch_appeal_links(cur)
     cur.close(); conn.close()
 
     orders = [o for o in orders if o["id"]]
@@ -302,7 +323,7 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
         for t in otags:
             facet_counts[t["facet"]][t["code"]] += 1
 
-        appeal = _appeal_status(o, appeal_links)
+        appeal = _appeal_status(o, appeal_links, linkage_ready)
 
         # light index row — everything the browser needs to facet/sort/list.
         index.append({
@@ -344,29 +365,43 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
         f"(CERC {cerc_tagged}/{cerc_total}, APTEL {aptel_tagged}/{aptel_total})")
 
     if not shards_only:
-        _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links)
+        _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links, linkage_ready)
     log(f"done -> {out_dir}")
 
 
-def _appeal_status(order, appeal_links):
+def _appeal_status(order, appeal_links, linkage_ready):
+    """Appeal posture for a CERC order.
+
+    linkage_ready: True only when a real appeal-matching pass has populated the
+    link table. If it hasn't, we must NOT claim 'unappealed' — absence of a row
+    then means 'we never checked', not 'no appeal exists'. Return 'unknown' so
+    the UI shows nothing rather than asserting a falsehood.
+    """
     if order["forum"] != "CERC":
         return {"status": "n/a", "chain": []}
-    chain = appeal_links.get(order["petition_no"], [])
+    chain = appeal_links.get(_norm_petition(order["petition_no"]), [])
     if not chain:
-        return {"status": "unappealed", "chain": []}
+        return {"status": "unappealed" if linkage_ready else "unknown", "chain": []}
     disps = {(c.get("disposition") or "").lower() for c in chain}
-    if any("set aside" in d or "allowed" in d for d in disps):
-        status = "set_aside"
-    elif any("dismiss" in d or "affirm" in d for d in disps):
-        status = "affirmed"
-    elif any("remand" in d for d in disps):
+    disps.discard("")
+    # build_appeal_links stores canonical keys (set_aside/allowed/dismissed/
+    # remanded); free-text phrases may also appear. Match both.
+    def has(*needles):
+        return any(any(n in d for n in needles) for d in disps)
+    if not disps:
+        status = "appealed_pending"          # linked but disposition unread
+    elif has("set_aside", "set aside", "allowed"):
+        status = "set_aside"                 # CERC order disturbed
+    elif has("dismiss", "affirm"):
+        status = "affirmed"                  # CERC order upheld
+    elif has("remand"):
         status = "remanded"
     else:
         status = "appealed_pending"
     return {"status": status, "chain": chain}
 
 
-def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links):
+def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links, linkage_ready):
     agg_dir = out_dir / "agg"
     agg_dir.mkdir(exist_ok=True)
 
@@ -384,7 +419,7 @@ def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links):
     for o in orders:
         if o["forum"] != "CERC":
             continue
-        st = _appeal_status(o, appeal_links)
+        st = _appeal_status(o, appeal_links, linkage_ready)
         if st["status"] in ("set_aside", "remanded"):
             set_aside.append({
                 "id": o["id"], "no": o["petition_no"], "date": o["date"],
