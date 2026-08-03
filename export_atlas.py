@@ -70,8 +70,27 @@ def log(msg):
 
 # ---- taxonomy ---------------------------------------------------------------
 
+def load_taxonomy_db(cur):
+    """Read {code: {name, facet, parent, definition}} from taxonomy_nodes.
+
+    This is the same table the tagger reads (facet, code, name). Preferred over
+    CSVs because it's guaranteed in sync with what actually got tagged.
+    """
+    nodes = {}
+    try:
+        cur.execute("SELECT facet, code, name FROM taxonomy_nodes")
+    except psycopg2.Error:
+        log("WARN: taxonomy_nodes not queryable; will try CSVs")
+        return nodes
+    for facet, code, name in cur.fetchall():
+        nodes[code] = {"name": name or code, "facet": facet,
+                       "parent": None, "definition": ""}
+    log(f"taxonomy (db): {len(nodes)} nodes")
+    return nodes
+
+
 def load_taxonomy(tax_dir: Path):
-    """Flatten the facet CSVs into {code: {name, parent, facet, definition}}."""
+    """Fallback: flatten facet CSVs into {code: {name, parent, facet, definition}}."""
     nodes = {}
     if not tax_dir.exists():
         log(f"WARN: taxonomy dir {tax_dir} missing; tags will show codes only")
@@ -123,13 +142,24 @@ def _first(row, *names):
 
 
 def _normalize_order(row, forum):
-    """Map heterogeneous CERC/APTEL columns to one shape. Missing -> None."""
-    oid = _first(row, "id", "doc_id", "hash", "content_hash")
+    """Map the real CERC/APTEL columns to one shape. Missing -> None.
+
+    CERC  (cerc_orders):  id, petition_no, subject, date_order, date_posted,
+                          category, pdf_url, pdf_digest, pdf_fulltext
+    APTEL (aptel_orders): id, petition_no, cause_title, bench, date_of_decision,
+                          date_uploaded, pdf_url, pdf_digest, pdf_fulltext
+    """
+    oid = _first(row, "id", "doc_id", "content_hash", "hash")
     petition_no = _first(row, "petition_no", "case_no", "case_number", "diary_no")
-    date = _first(row, "order_date", "date", "judgment_date", "pronounced_on")
-    title = _first(row, "title", "cause_title", "subject")
+    # CERC uses date_order/subject; APTEL uses date_of_decision/cause_title.
+    date = _first(row, "date_order", "date_of_decision",
+                  "order_date", "judgment_date", "date")
+    title = _first(row, "subject", "cause_title", "title")
+    # APTEL has no separate party column — the cause title carries the parties.
     party = _first(row, "petitioner", "appellant", "party")
-    summary = _first(row, "summary", "pdf_digest")
+    if not party and forum == "APTEL":
+        party = None  # cause_title already shown as the title
+    summary = _first(row, "pdf_digest", "summary")
     url = _first(row, "pdf_url", "url", "source_url", "link")
     return {
         "id": str(oid) if oid is not None else None,
@@ -144,11 +174,19 @@ def _normalize_order(row, forum):
     }
 
 
+# tagger writes source='cerc'|'aptel'; the atlas keys orders by forum 'CERC'|'APTEL'.
+SOURCE_TO_FORUM = {"cerc": "CERC", "aptel": "APTEL"}
+
+
 def fetch_tags(cur):
-    """doc_tags -> {(source, doc_id): [ {facet, code, confidence, method} ]}."""
+    """doc_tags -> {(FORUM, doc_id): [ {facet, code, confidence, method} ]}.
+
+    Real schema (from tag_documents.py):
+      doc_tags(source, doc_id, facet, code, confidence, method, rank)
+    """
     try:
         cur.execute(
-            "SELECT source, doc_id, facet, node_code, confidence, method "
+            "SELECT source, doc_id, facet, code, confidence, method "
             "FROM doc_tags"
         )
     except psycopg2.Error:
@@ -156,7 +194,8 @@ def fetch_tags(cur):
         return {}
     tags = defaultdict(list)
     for source, doc_id, facet, code, conf, method in cur.fetchall():
-        tags[(source, str(doc_id))].append({
+        forum = SOURCE_TO_FORUM.get((source or "").lower(), source)
+        tags[(forum, str(doc_id))].append({
             "facet": facet, "code": code,
             "confidence": float(conf) if conf is not None else None,
             "method": method,
@@ -222,12 +261,21 @@ def _year(iso):
     return iso[:4] if iso else None
 
 
+def _is_subject(facet):
+    """True for the subject-matter facet under either naming scheme."""
+    f = (facet or "").lower()
+    return f == "subject" or f.startswith("facet_1")
+
+
 # ---- assembly ---------------------------------------------------------------
 
 def build(out_dir: Path, tax_dir: Path, shards_only=False):
-    taxonomy = load_taxonomy(tax_dir)
     conn = connect()
     cur = conn.cursor()
+
+    taxonomy = load_taxonomy_db(cur)      # preferred: in sync with the tagger
+    if not taxonomy:                      # fallback to committed CSVs
+        taxonomy = load_taxonomy(tax_dir)
 
     orders = (fetch_orders(cur, APTEL_TABLE, "APTEL")
               + fetch_orders(cur, CERC_TABLE, "CERC"))
@@ -344,11 +392,12 @@ def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links):
             })
     _write_json(agg_dir / "set_aside.json", set_aside)
 
-    # issue frequency: subject-matter facet only, with human names
+    # issue frequency: subject-matter facet only, with human names.
+    # tagger facet is "subject" (DB) or "facet_1_*" (CSV fallback).
     subj_counter = Counter()
     for (forum, oid), otags in tags.items():
         for t in otags:
-            if (t.get("facet") or "").startswith("facet_1"):
+            if _is_subject(t.get("facet")):
                 subj_counter[t["code"]] += 1
     issues = [
         {"code": c, "name": taxonomy.get(c, {}).get("name", c), "count": n}
