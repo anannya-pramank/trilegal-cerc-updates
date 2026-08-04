@@ -40,7 +40,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install deps
-        run: pip install requests sentence-transformers pyyaml psycopg2-binary pgvector
+        run: pip install requests feedparser sentence-transformers pyyaml psycopg2-binary pgvector
 
       - name: Backfill
         env:
