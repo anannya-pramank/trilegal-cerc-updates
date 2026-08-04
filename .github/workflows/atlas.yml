@@ -37,7 +37,22 @@ jobs:
           cache: pip
 
       - name: Install deps
-        run: pip install psycopg2-binary
+        run: pip install psycopg2-binary feedparser pyyaml pgvector sentence-transformers
+
+      - name: News watch (RSS ingest)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python news_watch.py
+
+      - name: Tag news to taxonomy (subject facet)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python tag_news.py --skip-tagged
+
+      - name: Link news to orders (Tier A, entity+date)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python link_news.py
 
       - name: Build appeal linkage (CERC -> APTEL)
         env:
