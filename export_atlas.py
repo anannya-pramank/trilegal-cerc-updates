@@ -174,8 +174,8 @@ def _normalize_order(row, forum):
     }
 
 
-# tagger writes source='cerc'|'aptel'; the atlas keys orders by forum 'CERC'|'APTEL'.
-SOURCE_TO_FORUM = {"cerc": "CERC", "aptel": "APTEL"}
+# tagger writes source='cerc'|'aptel'|'news'; the atlas keys by these labels.
+SOURCE_TO_FORUM = {"cerc": "CERC", "aptel": "APTEL", "news": "NEWS"}
 
 
 def _norm_petition(pno):
@@ -241,6 +241,51 @@ def fetch_appeal_links(cur):
     return links, ready
 
 
+def fetch_news(cur):
+    """news_items -> list of dicts. Empty/absent table degrades gracefully."""
+    try:
+        cur.execute(
+            "SELECT id, source, url, title, published, summary, relevance "
+            "FROM news_items ORDER BY published DESC NULLS LAST"
+        )
+    except psycopg2.Error:
+        log("WARN: news_items absent; news tab will be empty")
+        return []
+    out = []
+    for nid, source, url, title, pub, summary, rel in cur.fetchall():
+        out.append({
+            "id": str(nid), "source": source, "url": url,
+            "title": _clean(title), "published": _iso_date(pub),
+            "summary": _clean(summary),
+            "relevance": float(rel) if rel is not None else None,
+        })
+    log(f"news_items: {len(out)} items")
+    return out
+
+
+def fetch_news_order_links(cur):
+    """news_order_links -> {(forum,order_id): [links]} and {news_id: [links]}."""
+    by_order, by_news = defaultdict(list), defaultdict(list)
+    try:
+        cur.execute(
+            "SELECT news_id, forum, order_id, method, score, evidence "
+            "FROM news_order_links"
+        )
+    except psycopg2.Error:
+        log("WARN: news_order_links absent; no Tier-A entity links")
+        return by_order, by_news
+    n = 0
+    for nid, forum, oid, method, score, ev in cur.fetchall():
+        rec = {"news_id": str(nid), "forum": forum, "order_id": str(oid),
+               "method": method, "score": float(score) if score is not None else None,
+               "evidence": ev}
+        by_order[(forum, str(oid))].append(rec)
+        by_news[str(nid)].append(rec)
+        n += 1
+    log(f"news_order_links: {n} candidate links")
+    return by_order, by_news
+
+
 # ---- helpers ----------------------------------------------------------------
 
 _WS = re.compile(r"\s+")
@@ -302,7 +347,19 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
               + fetch_orders(cur, CERC_TABLE, "CERC"))
     tags = fetch_tags(cur)
     appeal_links, linkage_ready = fetch_appeal_links(cur)
+    news = fetch_news(cur)
+    news_by_order, news_by_id = fetch_news_order_links(cur)
     cur.close(); conn.close()
+
+    # news carry subject tags too (source='news'), in the same doc_tags table.
+    news_tags = {n["id"]: sorted({t["code"] for t in tags.get(("NEWS", n["id"]), [])})
+                 for n in news}
+    # subject-code -> news items, for issue dossiers and per-order issue overlap.
+    news_by_subject = defaultdict(list)
+    for n in news:
+        for code in news_tags.get(n["id"], []):
+            if _is_subject(taxonomy.get(code, {}).get("facet") or code):
+                news_by_subject[code].append(n["id"])
 
     orders = [o for o in orders if o["id"]]
     orders.sort(key=lambda o: (o["date"] or "0000", o["forum"], o["id"]))
@@ -340,6 +397,27 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
             for t in sorted(otags, key=lambda x: (x["facet"], -(x["confidence"] or 0)))
         ]
         detail["appeal"] = appeal
+        # related news: Tier-A entity candidate links (precise) for this order...
+        entity_news = news_by_order.get((o["forum"], o["id"]), [])
+        news_lookup = {n["id"]: n for n in news}
+        detail["news_entity"] = [
+            {**news_lookup[l["news_id"]], "method": l["method"],
+             "score": l["score"], "evidence": l["evidence"]}
+            for l in sorted(entity_news, key=lambda x: -(x["score"] or 0))
+            if l["news_id"] in news_lookup
+        ][:8]
+        # ...and Tier-B: news sharing a subject code with this order (broad).
+        o_subjects = {c for c in codes
+                      if _is_subject(taxonomy.get(c, {}).get("facet") or c)}
+        issue_news_ids = []
+        for c in o_subjects:
+            issue_news_ids += news_by_subject.get(c, [])
+        # exclude any already shown as entity links; cap and keep most recent
+        shown = {n["id"] for n in detail["news_entity"]}
+        issue_news = [news_lookup[i] for i in dict.fromkeys(issue_news_ids)
+                      if i in news_lookup and i not in shown]
+        issue_news.sort(key=lambda n: n["published"] or "", reverse=True)
+        detail["news_issue"] = issue_news[:8]
         _write_json(orders_dir / f"{_safe(o['id'])}.json", detail)
 
     _write_json(out_dir / "index.json", index)
@@ -364,8 +442,26 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
     log(f"index: {total} orders, {tagged_count} tagged "
         f"(CERC {cerc_tagged}/{cerc_total}, APTEL {aptel_tagged}/{aptel_total})")
 
+    # News tab feed: each item with its subject tags + how many orders it links to.
+    news_out = []
+    for n in news:
+        codes = news_tags.get(n["id"], [])
+        subj = [c for c in codes
+                if _is_subject(taxonomy.get(c, {}).get("facet") or c)]
+        news_out.append({
+            **n,
+            "tags": subj,
+            "tag_names": [taxonomy.get(c, {}).get("name", c) for c in subj],
+            "n_links": len(news_by_id.get(n["id"], [])),
+        })
+    _write_json(out_dir / "news.json", news_out)
+    log(f"news: {len(news_out)} items "
+        f"({sum(1 for n in news_out if n['tags'])} tagged, "
+        f"{sum(1 for n in news_out if n['n_links'])} with entity links)")
+
     if not shards_only:
-        _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links, linkage_ready)
+        _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links,
+                          linkage_ready, news_by_subject)
     log(f"done -> {out_dir}")
 
 
@@ -401,7 +497,9 @@ def _appeal_status(order, appeal_links, linkage_ready):
     return {"status": status, "chain": chain}
 
 
-def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links, linkage_ready):
+def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links,
+                      linkage_ready, news_by_subject=None):
+    news_by_subject = news_by_subject or {}
     agg_dir = out_dir / "agg"
     agg_dir.mkdir(exist_ok=True)
 
@@ -435,7 +533,8 @@ def _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links, linkage_rea
             if _is_subject(t.get("facet")):
                 subj_counter[t["code"]] += 1
     issues = [
-        {"code": c, "name": taxonomy.get(c, {}).get("name", c), "count": n}
+        {"code": c, "name": taxonomy.get(c, {}).get("name", c), "count": n,
+         "news": len(set(news_by_subject.get(c, [])))}
         for c, n in subj_counter.most_common()
     ]
     _write_json(agg_dir / "issues.json", issues)
