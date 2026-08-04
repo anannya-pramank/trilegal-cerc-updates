@@ -442,17 +442,33 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
     log(f"index: {total} orders, {tagged_count} tagged "
         f"(CERC {cerc_tagged}/{cerc_total}, APTEL {aptel_tagged}/{aptel_total})")
 
-    # News tab feed: each item with its subject tags + how many orders it links to.
+    # News tab feed: each item with its subject tags + the ACTUAL order links
+    # (clickable), each carrying match method + evidence so weak matches are
+    # visible as weak rather than hidden behind a bare count.
+    order_meta = {(o["forum"], o["id"]): o for o in orders}
     news_out = []
     for n in news:
         codes = news_tags.get(n["id"], [])
         subj = [c for c in codes
                 if _is_subject(taxonomy.get(c, {}).get("facet") or c)]
+        links = []
+        for l in sorted(news_by_id.get(n["id"], []),
+                        key=lambda x: -(x["score"] or 0)):
+            om = order_meta.get((l["forum"], l["order_id"]))
+            links.append({
+                "forum": l["forum"], "order_id": l["order_id"],
+                "method": l["method"], "score": l["score"],
+                "evidence": l["evidence"],
+                "order_no": om["petition_no"] if om else None,
+                "order_title": om["title"] if om else None,
+                "order_date": om["date"] if om else None,
+            })
         news_out.append({
             **n,
             "tags": subj,
             "tag_names": [taxonomy.get(c, {}).get("name", c) for c in subj],
-            "n_links": len(news_by_id.get(n["id"], [])),
+            "n_links": len(links),
+            "links": links,
         })
     _write_json(out_dir / "news.json", news_out)
     log(f"news: {len(news_out)} items "
