@@ -111,6 +111,7 @@
   }
   .chip:hover{background:var(--acc); color:#fff}
   .chip.on{background:var(--acc); color:#fff}
+  .newslink:hover{background:var(--panel-2)}
   .listbar .sort{margin-left:auto}
   .listbar select{
     background:var(--panel); color:var(--fg); border:1px solid var(--line);
@@ -416,6 +417,7 @@ function openDrawer(id,forum){
 }
 function closeDrawer(){$("#drawer").classList.remove("open");}
 window.closeDrawer=closeDrawer;
+window.openDrawer=openDrawer;
 
 function paintDrawer(o){
   const d=$("#drawer");
@@ -576,8 +578,23 @@ function paintNews(v){
     h+=`<span class="mtag" style="background:var(--acc-dim);color:#cfe1fb">${esc(SRC[n.source]||n.source)}</span>`;
     (n.tag_names||[]).forEach(t=>h+=`<span class="mtag">${esc(t)}</span>`);
     if(!(n.tag_names||[]).length)h+=`<span class="untagged">untagged</span>`;
-    if(n.n_links)h+=`<span class="mtag" style="color:var(--warn)">${n.n_links} order link${n.n_links>1?"s":""}</span>`;
-    h+=`</div></div>`;
+    if(n.n_links)h+=`<span class="mtag" style="color:var(--warn)">${n.n_links} order match${n.n_links>1?"es":""} ↓</span>`;
+    h+=`</div>`;
+    if((n.links||[]).length){
+      h+=`<div style="margin-top:6px;padding-left:10px;border-left:2px solid var(--line)">`;
+      n.links.forEach(l=>{
+        const strong=(l.score||0)>=0.9;
+        h+=`<div class="newslink" onclick="openDrawer('${esc(l.order_id)}','${esc(l.forum)}')" `+
+          `style="padding:3px 0;cursor:pointer;font-size:12px">`+
+          `<span class="badge b-forum-${esc(l.forum)}" style="font-size:8.5px">${esc(l.forum)}</span> `+
+          `<span style="font-family:var(--mono);font-size:11px;color:var(--acc)">${esc(l.order_no||l.order_id)}</span> `+
+          `<span style="color:var(--mut)">${esc((l.order_title||"").slice(0,54))}</span>`+
+          `<span style="font-family:var(--mono);font-size:9.5px;color:${strong?'var(--ok)':'var(--dim)'};margin-left:6px">`+
+          `${esc(l.method)}·${esc(l.evidence||"")}</span></div>`;
+      });
+      h+=`</div>`;
+    }
+    h+=`</div>`;
   });
   h+=`</div>`;
   v.innerHTML=h;
