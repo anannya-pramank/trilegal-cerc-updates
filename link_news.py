@@ -114,6 +114,36 @@ def mentions_forum(text):
     return forums
 
 
+# Markers that a story is COMMERCIAL (deal/financing/capacity news), not about an
+# adjudication. On these, a bare party+date match is almost always noise — the
+# party is named because it signed a deal, not because it litigated. We suppress
+# party+date links for such items unless an adjudicatory marker is also present.
+_TRANSACTIONAL = re.compile(
+    r"\b(ppa|power purchase agreement|signs?|signed|financing|funding|raises?|"
+    r"raised|acquires?|acquisition|commissions?|commissioned|inaugurat|"
+    r"awarded|wins? (?:bid|auction|tender)|mou|joint venture|jv|stake|"
+    r"ipo|listing|order book|mw|gw|capacity|manufactur|plant|module|cell)\b",
+    re.I,
+)
+_ADJUDICATORY = re.compile(
+    r"\b(cerc|aptel|appellate tribunal|petition|impugned|order dated|tariff order|"
+    r"regulation|adjudicat|dispute|change in law|late payment surcharge|"
+    r"true[ -]?up|deemed generation|must[ -]?run|set aside|remand|appeal)\b",
+    re.I,
+)
+
+
+def story_kind(text):
+    """('adjudicatory'|'transactional'|'neutral') for a news item's text."""
+    adj = bool(_ADJUDICATORY.search(text or ""))
+    txn = bool(_TRANSACTIONAL.search(text or ""))
+    if adj:
+        return "adjudicatory"          # adjudicatory wins if both present
+    if txn:
+        return "transactional"
+    return "neutral"
+
+
 # ---- db ---------------------------------------------------------------------
 
 def connect():
@@ -168,11 +198,18 @@ def build_links(orders, news, window):
     rows = []
     for nid, title, summary, fulltext, ndate in news:
         text = f"{title} {summary} {fulltext}"
-        # 1) petition-number match (strongest)
+        kind = story_kind(text)
+        # 1) petition-number match (strongest) — ALWAYS kept, even on deal news:
+        #    a quoted petition number is unambiguous.
         for pno in petition_numbers_in(text):
             for forum, oid, odate in by_pet.get(pno, []):
                 rows.append((nid, forum, oid, "petition_no", 0.95,
                              f"quoted {pno}"))
+        # Transactional stories (PPA/financing/capacity) name parties because
+        # they signed deals, not because they litigated. Skip the weak
+        # party-based matchers for them to avoid spurious order links.
+        if kind == "transactional":
+            continue
         # 2) party + date proximity
         n_anchors = anchors_in(text)
         n_forums = mentions_forum(text)
@@ -182,6 +219,11 @@ def build_links(orders, news, window):
                 dd = daydiff(ndate, odate)
                 if dd is not None and dd <= window:
                     score = round(0.6 + 0.3 * (1 - dd / window), 3)
+                    # nudge score up for adjudicatory stories, down for neutral
+                    if kind == "adjudicatory":
+                        score = round(min(1.0, score + 0.1), 3)
+                    else:
+                        score = round(score - 0.1, 3)
                     rows.append((nid, forum, oid, "party+date", score,
                                  f"{a} within {dd}d"))
                     matched_pairs.add((forum, oid))
