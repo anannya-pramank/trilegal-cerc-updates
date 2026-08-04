@@ -1,0 +1,87 @@
+# news_sources.yaml — declarative rulebook for the energy-regulation news watch.
+#
+# Each source is an RSS feed (or several). The ingester (news_watch.py) reads
+# this file, pulls each feed, applies the admission gate, and writes survivors
+# to news_items. Add/scope a source by editing here — no code change.
+#
+# ADMISSION GATE (two-track, like the ESG scraper):
+#   A story is admitted if EITHER
+#     (a) it comes from a feed already scoped to regulation/policy (scoped: true),
+#         which we trust wholesale, OR
+#     (b) its title+summary matches >= `min_keyword_hits` of the regulatory
+#         keyword set below (for broad feeds like Moneycontrol).
+#   Everything else is dropped at ingest — we are not mirroring the whole feed.
+
+defaults:
+  min_keyword_hits: 1
+  # Regulatory/adjudicatory vocabulary. Deliberately electricity-regulation
+  # focused so project-financing / markets noise is filtered out of broad feeds.
+  keywords:
+    - CERC
+    - APTEL
+    - tribunal
+    - tariff order
+    - tariff petition
+    - change in law
+    - must run
+    - deemed generation
+    - power purchase agreement
+    - PPA
+    - late payment surcharge
+    - DSM
+    - deviation settlement
+    - open access
+    - transmission charges
+    - regulatory commission
+    - SERC
+    - electricity regulatory
+    - Supreme Court           # often the appellate layer above APTEL
+    - Appellate Tribunal
+    - petition
+    - impugned order
+    - compensation
+    - true up
+
+sources:
+  # --- feeds already scoped to energy/regulation: trusted wholesale ---------
+  - id: mercom
+    name: Mercom India
+    scoped: true
+    feeds:
+      # Mercom exposes per-tag feeds; scope to the regulatory tags rather than
+      # the firehose. If a tag 404s, drop it — the ingester tolerates dead feeds.
+      - https://www.mercomindia.com/tag/policy/feed
+      - https://www.mercomindia.com/tag/regulation/feed
+      - https://www.mercomindia.com/category/policy/feed        # fallback shape
+    # even trusted feeds still get keyword-scored for the relevance value,
+    # they're just not GATED on it.
+
+  - id: saur
+    name: Saur Energy International
+    scoped: true
+    feeds:
+      - https://www.saurenergy.com/feed
+      - https://www.saurenergy.com/solar-energy-news/category/policy/feed
+
+  - id: energetica
+    name: Energetica India
+    scoped: true
+    feeds:
+      - https://www.energetica-india.net/rss
+
+  - id: et_energyworld
+    name: ET EnergyWorld
+    scoped: false          # section feeds are broad (power/coal/renewable); gate them
+    feeds:
+      - https://energy.economictimes.indiatimes.com/rss/topstories
+      - https://energy.economictimes.indiatimes.com/rss/renewable
+      - https://energy.economictimes.indiatimes.com/rss/power
+
+  # --- broad financial feed: gated hard on keywords ------------------------
+  - id: moneycontrol
+    name: Moneycontrol
+    scoped: false
+    min_keyword_hits: 2    # stricter: it's a markets feed, needs a stronger signal
+    feeds:
+      - https://www.moneycontrol.com/rss/latestnews.xml
+      - https://www.moneycontrol.com/rss/business.xml
