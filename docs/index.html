@@ -110,6 +110,7 @@
     border-radius:3px; padding:1px 7px; font-size:10px; cursor:pointer;
   }
   .chip:hover{background:var(--acc); color:#fff}
+  .chip.on{background:var(--acc); color:#fff}
   .listbar .sort{margin-left:auto}
   .listbar select{
     background:var(--panel); color:var(--fg); border:1px solid var(--line);
@@ -215,6 +216,7 @@
   <button data-tab="dashboard" aria-selected="false">Overview</button>
   <button data-tab="setaside" aria-selected="false">Set-aside tracker</button>
   <button data-tab="issues" aria-selected="false">Issues</button>
+  <button data-tab="news" aria-selected="false">News</button>
 </nav>
 <main>
   <aside id="rail">
@@ -344,6 +346,7 @@ function render(){
   if(state.tab==="dashboard")return renderDashboard();
   if(state.tab==="setaside")return renderAgg("set_aside.json",renderSetAside);
   if(state.tab==="issues")return renderAgg("issues.json",renderIssues);
+  if(state.tab==="news")return renderNews();
 }
 
 function renderBrowse(){
@@ -449,6 +452,30 @@ function paintDrawer(o){
   }
 
   if(o.url)html+=`<h4>Source</h4><a href="${esc(o.url)}" target="_blank" rel="noopener">Open original PDF ↗</a>`;
+
+  // related news — Tier A (entity, precise) then Tier B (issue, broad)
+  const ent=o.news_entity||[], iss=o.news_issue||[];
+  if(ent.length||iss.length){
+    const SRC={mercom:"Mercom",saur:"Saur",energetica:"Energetica",et_energyworld:"ET EnergyWorld",moneycontrol:"Moneycontrol"};
+    if(ent.length){
+      html+=`<h4>Related news — entity match <span class="untagged">candidates, verify</span></h4>`;
+      ent.forEach(n=>{
+        html+=`<div style="padding:6px 0;border-bottom:1px solid var(--panel-2)">`+
+          `<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:12.5px">${esc(n.title)}</a>`+
+          `<div style="margin-top:3px;font-family:var(--mono);font-size:10px;color:var(--dim)">`+
+          `${esc(n.published||"")} · ${esc(SRC[n.source]||n.source)} · ${esc(n.method)} · ${esc(n.evidence||"")}</div></div>`;
+      });
+    }
+    if(iss.length){
+      html+=`<h4>In the news on this issue</h4>`;
+      iss.forEach(n=>{
+        html+=`<div style="padding:6px 0;border-bottom:1px solid var(--panel-2)">`+
+          `<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:12.5px">${esc(n.title)}</a>`+
+          `<div style="margin-top:3px;font-family:var(--mono);font-size:10px;color:var(--dim)">`+
+          `${esc(n.published||"")} · ${esc(SRC[n.source]||n.source)}</div></div>`;
+      });
+    }
+  }
   html+=`</div>`;
   d.innerHTML=html;
 }
@@ -515,6 +542,47 @@ function renderIssues(rows){
 window.jumpIssue=(code)=>{
   state.active={tags:[code]}; setTab("browse"); repaintFacets(); render();
 };
+
+// ---- news tab --------------------------------------------------------------
+let _newsCache=null, _newsSource="all";
+function renderNews(){
+  const v=$("#view"); 
+  if(_newsCache){ paintNews(v); return; }
+  v.innerHTML=`<div class="loading">Loading news…</div>`;
+  j("news.json").then(rows=>{_newsCache=rows; paintNews(v);})
+    .catch(()=>{v.innerHTML=`<div class="empty"><div class="big">No news yet</div>`+
+      `Run <code>news_watch.py</code> then <code>tag_news.py</code> to populate the watch.</div>`;});
+}
+function paintNews(v){
+  const rows=_newsCache;
+  const SRC={mercom:"Mercom",saur:"Saur Energy",energetica:"Energetica",
+             et_energyworld:"ET EnergyWorld",moneycontrol:"Moneycontrol"};
+  const counts=new Counter(); rows.forEach(r=>counts.add(r.source));
+  const shown=_newsSource==="all"?rows:rows.filter(r=>r.source===_newsSource);
+  let h=`<div class="pad" style="max-width:820px">`;
+  h+=`<p class="note" style="margin-bottom:14px">Energy-regulation news, auto-tagged to the same subject taxonomy as orders. Items tagged to an issue appear on that issue's orders; precise entity matches appear on the specific order.</p>`;
+  h+=`<div class="chips" style="margin-bottom:16px">`;
+  h+=`<span class="chip${_newsSource==="all"?" on":""}" onclick="setNewsSource('all')">All (${rows.length})</span>`;
+  for(const[s,label] of Object.entries(SRC))
+    if(counts.get(s))h+=`<span class="chip${_newsSource===s?" on":""}" onclick="setNewsSource('${s}')">${label} (${counts.get(s)})</span>`;
+  h+=`</div>`;
+  if(!shown.length)h+=`<div class="empty">No items from this source yet.</div>`;
+  shown.slice(0,200).forEach(n=>{
+    h+=`<div style="padding:11px 0;border-bottom:1px solid var(--panel-2)">`;
+    h+=`<div style="display:flex;gap:10px;align-items:baseline">`;
+    h+=`<span class="date" style="font-family:var(--mono);font-size:11px;color:var(--mut);white-space:nowrap">${esc(n.published||"—")}</span>`;
+    h+=`<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:13.5px;color:var(--fg)">${esc(n.title)}</a></div>`;
+    h+=`<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">`;
+    h+=`<span class="mtag" style="background:var(--acc-dim);color:#cfe1fb">${esc(SRC[n.source]||n.source)}</span>`;
+    (n.tag_names||[]).forEach(t=>h+=`<span class="mtag">${esc(t)}</span>`);
+    if(!(n.tag_names||[]).length)h+=`<span class="untagged">untagged</span>`;
+    if(n.n_links)h+=`<span class="mtag" style="color:var(--warn)">${n.n_links} order link${n.n_links>1?"s":""}</span>`;
+    h+=`</div></div>`;
+  });
+  h+=`</div>`;
+  v.innerHTML=h;
+}
+window.setNewsSource=(s)=>{_newsSource=s; paintNews($("#view"));};
 
 // ---- misc ------------------------------------------------------------------
 function card(k,v,sub){return `<div class="card"><div class="k">${k}</div>`+
