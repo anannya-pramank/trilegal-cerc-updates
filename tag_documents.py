@@ -271,7 +271,7 @@ def clean_label(name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", choices=["cerc", "aptel"], required=True)
+    ap.add_argument("--source", choices=["cerc", "aptel", "news"], required=True)
     ap.add_argument("--backend", choices=["local", "llm", "embed"], default="local")
     ap.add_argument("--local-model", default="MoritzLaurer/deberta-v3-base-zeroshot-v2.0-c",
                     help="HF zero-shot model for --backend local. Use the -large- "
