@@ -33,7 +33,6 @@ import datetime as dt
 from pathlib import Path
 
 import yaml
-import feedparser
 import psycopg2
 import psycopg2.extras
 
@@ -99,6 +98,7 @@ def relevance_and_gate(title, summary, source):
 
 
 def pull_source(source, dry_run=False):
+    import feedparser   # lazy: only needed for live RSS, not for importers reusing helpers
     rows = []
     seen = set()
     for feed_url in source["feeds"]:
