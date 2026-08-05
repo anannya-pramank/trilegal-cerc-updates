@@ -1,0 +1,54 @@
+name: News backfill (one-time)
+
+# Manual, resumable one-year historical backfill of the WordPress sources
+# (Saur, Energetica, Mercom). Run it a few times if needed — dedup makes
+# re-runs cheap, and --deadline-minutes flushes before the Actions kill.
+#
+# After the backfill has ingested history, run "Build Atlas site" (or wait for
+# the nightly) to tag (full DeBERTa), link, and publish. Tagging a year of
+# items is the slow part and is itself resumable via tag_news --skip-tagged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: "How many months back"
+        default: "12"
+      source:
+        description: "Single source id (blank = all three WP sites)"
+        default: ""
+      dry_run:
+        description: "Validate WP endpoints only, write nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: news-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330            # under the 6h ceiling; deadline flushes earlier
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install deps
+        run: pip install requests feedparser sentence-transformers pyyaml psycopg2-binary pgvector
+
+      - name: Backfill (sitemap walk)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python news_backfill_sitemap.py \
+            --months ${{ inputs.months }} \
+            ${{ inputs.source && format('--source {0}', inputs.source) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            --delay 0.4 \
+            --deadline-minutes 300
