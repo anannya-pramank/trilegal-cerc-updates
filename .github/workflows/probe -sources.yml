@@ -1,0 +1,27 @@
+name: Probe news sources
+
+# Diagnostic: figure out what each site allows for backfill (WP REST / feed /
+# sitemap / blocked). Prints to the run log — paste it back to decide the path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ua:
+        description: "User-Agent to try: bot or browser"
+        default: "bot"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Probe
+        run: python probe_sources.py --ua ${{ inputs.ua }}
