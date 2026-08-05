@@ -170,6 +170,14 @@ def connect():
 def upsert(conn, rows, with_embed):
     if not rows:
         return 0
+    # Dedup by id (last-wins). Postgres ON CONFLICT DO UPDATE raises
+    # CardinalityViolation if one statement proposes the same id twice, which
+    # happens when two source URLs normalize to the same id. Collapse here so
+    # no caller can trigger it.
+    deduped = {}
+    for r in rows:
+        deduped[r["id"]] = r
+    rows = list(deduped.values())
     cols = ["id", "source", "url", "title", "published", "summary", "relevance"]
     if with_embed:
         cols.append("embedding")
