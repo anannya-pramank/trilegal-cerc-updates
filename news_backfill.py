@@ -112,10 +112,25 @@ def fetch_wp_month(base, after_iso, before_iso, dry_run=False):
         if r.status_code == 404:
             log(f"    404 — WP REST not at this base?")
             return None
+        if r.status_code == 403:
+            log(f"    403 — blocked (bot protection). Skipping source.")
+            return None
         if r.status_code != 200:
             log(f"    HTTP {r.status_code} p{page}")
             break
-        batch = r.json()
+        # Guard against non-JSON bodies (block pages, HTML redirects). A WP REST
+        # endpoint returns application/json; anything else means we're not
+        # actually talking to the API — skip the source rather than crash.
+        ctype = r.headers.get("Content-Type", "")
+        if "json" not in ctype.lower():
+            log(f"    non-JSON response ({ctype or 'no content-type'}); "
+                f"not a live WP REST endpoint. Skipping source.")
+            return None
+        try:
+            batch = r.json()
+        except ValueError:
+            log(f"    response was not decodable JSON; skipping source.")
+            return None
         if not isinstance(batch, list) or not batch:
             break
         out.extend(batch)
