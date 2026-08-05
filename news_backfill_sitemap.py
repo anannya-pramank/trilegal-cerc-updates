@@ -66,8 +66,9 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 HEADERS = {"User-Agent": BROWSER_UA, "Accept": "*/*"}
 
 # child-sitemap URL hints worth recursing into (skip tag/category/author maps)
-GOOD_CHILD = re.compile(r"(post|news|article|sitemap-pt|sitemap\d)", re.I)
-SKIP_CHILD = re.compile(r"(tag|category|author|page-sitemap|product)", re.I)
+GOOD_CHILD = re.compile(r"(post|news|article|sitemap-pt)", re.I)
+SKIP_CHILD = re.compile(r"(tag|category|author|page-sitemap|product|"
+                        r"attachment|media|image|video|user)", re.I)
 
 SM_NS = {
     "sm": "http://www.sitemaps.org/schemas/sitemap/0.9",
@@ -194,10 +195,17 @@ def backfill(sid, since, until, dry_run, embed, delay, deadline_ts):
     admitted = 0
     processed = 0
     batch = []
+    seen_ids = set()          # url-normalized ids already handled this run
     for url, lm in sorted(urls.items(), key=lambda kv: (kv[1] or dt.date.min), reverse=True):
         if deadline_ts and time.monotonic() > deadline_ts:
             log(f"[{sid}] deadline hit after {processed} pages; flushing.")
             break
+        # two URLs can normalize to the same id (utm/slug variants). Skip dups
+        # BEFORE fetching — saves a request and prevents the ON CONFLICT dup.
+        iid = NW.item_id(url)
+        if iid in seen_ids:
+            continue
+        seen_ids.add(iid)
         processed += 1
         r = get(url)
         if delay and not dry_run:
@@ -213,7 +221,7 @@ def backfill(sid, since, until, dry_run, embed, delay, deadline_ts):
         admitted_flag, score, hits = NW.relevance_and_gate(title, summary, src)
         if not admitted_flag:
             continue
-        row = {"id": NW.item_id(url), "source": sid, "url": url, "title": title,
+        row = {"id": iid, "source": sid, "url": url, "title": title,
                "summary": summary,
                "published": date.isoformat() if date else None,
                "relevance": score}
