@@ -30,3 +30,4 @@ Speed on CPU (no GPU in Actions):
     base  model  ~ a few seconds/doc   (default)
     large model  ~ 3x that             (--local-model ...deberta-v3-large-zeroshot-v2.0-c)
     Use --deadline-minutes 320 in Actions; --skip-tagged resumes.
+
