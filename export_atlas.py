@@ -364,6 +364,18 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
     orders = [o for o in orders if o["id"]]
     orders.sort(key=lambda o: (o["date"] or "0000", o["forum"], o["id"]))
 
+    # --- entity resolution: resolve every order party + news item to canonical
+    #     entities, accumulate per-entity dossiers. Distinct entities stay
+    #     distinct (Adani Power != Adani Green). ---
+    registry = None
+    try:
+        from entity_resolver import EntityRegistry
+        registry = EntityRegistry("entities.yaml")
+        log(f"entities: {len(registry.entities)} in registry")
+    except Exception as e:
+        log(f"WARN: entity registry unavailable ({e}); entity view disabled")
+    dossiers = defaultdict(lambda: {"orders": [], "news": [], "issues": Counter()})
+
     orders_dir = out_dir / "orders"
     orders_dir.mkdir(parents=True, exist_ok=True)
 
@@ -382,11 +394,28 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
 
         appeal = _appeal_status(o, appeal_links, linkage_ready)
 
+        # resolve this order to canonical entities (from party + title, so both
+        # petitioner and any respondent named in the cause title are caught).
+        ents = []
+        if registry:
+            ents = registry.resolve_all(f"{o['party'] or ''} {o['title'] or ''}")
+            subj_codes = [c for c in codes
+                          if _is_subject(taxonomy.get(c, {}).get("facet") or c)]
+            for eid in ents:
+                dossiers[eid]["orders"].append({
+                    "id": o["id"], "forum": o["forum"], "no": o["petition_no"],
+                    "date": o["date"], "title": o["title"],
+                    "appeal": appeal["status"],
+                })
+                for c in subj_codes:
+                    dossiers[eid]["issues"][c] += 1
+
         # light index row — everything the browser needs to facet/sort/list.
         index.append({
             "id": o["id"], "forum": o["forum"], "no": o["petition_no"],
             "date": o["date"], "title": o["title"], "party": o["party"],
             "pt": o["pet_type"], "tags": codes, "appeal": appeal["status"],
+            "ents": ents,
         })
 
         # per-order detail — lazy-loaded on click.
@@ -474,6 +503,48 @@ def build(out_dir: Path, tax_dir: Path, shards_only=False):
     log(f"news: {len(news_out)} items "
         f"({sum(1 for n in news_out if n['tags'])} tagged, "
         f"{sum(1 for n in news_out if n['n_links'])} with entity links)")
+
+    # --- entity dossiers: resolve news to entities, then write one shard per
+    #     entity (its orders, news, issue mix, appeal outcomes) + the registry. ---
+    if registry:
+        news_lookup = {n["id"]: n for n in news}
+        for n in news:
+            ents = registry.resolve_all(f"{n['title'] or ''} {n.get('summary') or ''}")
+            for eid in ents:
+                dossiers[eid]["news"].append({
+                    "id": n["id"], "source": n["source"], "url": n["url"],
+                    "title": n["title"], "published": n["published"],
+                })
+        ent_dir = out_dir / "entities"
+        ent_dir.mkdir(exist_ok=True)
+        registry_out = []
+        for eid, e in registry.entities.items():
+            d = dossiers.get(eid, {"orders": [], "news": [], "issues": Counter()})
+            n_orders, n_news = len(d["orders"]), len(d["news"])
+            if n_orders == 0 and n_news == 0:
+                continue  # don't publish empty entities
+            # appeal outcome tally for this entity's CERC orders
+            appeal_tally = Counter(o["appeal"] for o in d["orders"]
+                                   if o["appeal"] not in ("n/a", "unknown"))
+            issues = [{"code": c, "name": taxonomy.get(c, {}).get("name", c),
+                       "count": k} for c, k in d["issues"].most_common()]
+            orders_sorted = sorted(d["orders"], key=lambda x: x["date"] or "", reverse=True)
+            news_sorted = sorted(d["news"], key=lambda x: x["published"] or "", reverse=True)
+            _write_json(ent_dir / f"{eid}.json", {
+                "id": eid, "name": e["name"], "type": e["type"],
+                "n_orders": n_orders, "n_news": n_news,
+                "appeal_tally": dict(appeal_tally),
+                "issues": issues,
+                "orders": orders_sorted,
+                "news": news_sorted,
+            })
+            registry_out.append({
+                "id": eid, "name": e["name"], "type": e["type"],
+                "aliases": e["aliases"], "n_orders": n_orders, "n_news": n_news,
+            })
+        registry_out.sort(key=lambda x: -(x["n_orders"] + x["n_news"]))
+        _write_json(out_dir / "entities.json", registry_out)
+        log(f"entities: {len(registry_out)} with content published")
 
     if not shards_only:
         _write_aggregates(out_dir, orders, tags, taxonomy, appeal_links,
