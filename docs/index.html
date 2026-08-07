@@ -118,7 +118,7 @@
     font-family:var(--mono); font-size:11px; padding:3px 6px; border-radius:3px;
   }
 
-  table{width:100%; border-collapse:collapse}
+  table{width:100%; border-collapse:collapse; table-layout:fixed}
   thead th{
     font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em;
     color:var(--dim); text-align:left; padding:8px 16px; border-bottom:1px solid var(--line);
@@ -127,9 +127,13 @@
   tbody tr{border-bottom:1px solid var(--panel-2); cursor:pointer}
   tbody tr:hover{background:var(--panel)}
   tbody td{padding:9px 16px; vertical-align:top}
-  td.no{font-family:var(--mono); font-size:12px; color:var(--acc); white-space:nowrap}
+  td.no{
+    font-family:var(--mono); font-size:12px; color:var(--acc);
+    overflow:hidden; text-overflow:ellipsis; word-break:break-word;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+  }
   td.date{font-family:var(--mono); font-size:12px; color:var(--mut); white-space:nowrap}
-  td.title{max-width:0; width:60%}
+  td.title{overflow:hidden}
   td.title .t{color:var(--fg); overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
   td.title .party{color:var(--dim); font-size:11.5px; margin-top:2px}
   .badge{
@@ -403,7 +407,10 @@ function renderBrowse(){
     return;
   }
   const t=el("table");
-  t.innerHTML="<thead><tr><th>Forum</th><th>Petition no.</th><th>Date</th>"+
+  t.innerHTML=
+    "<colgroup><col style='width:64px'><col style='width:24%'>"+
+    "<col style='width:104px'><col><col style='width:118px'></colgroup>"+
+    "<thead><tr><th>Forum</th><th>Petition no.</th><th>Date</th>"+
     "<th>Order</th><th>Appeal</th></tr></thead>";
   const tb=el("tbody");
   rows.slice(0,400).forEach(o=>tb.appendChild(rowFor(o)));
@@ -416,7 +423,7 @@ function renderBrowse(){
 function rowFor(o){
   const tr=el("tr"); tr.onclick=()=>openDrawer(o.id,o.forum);
   const f=el("td"); f.appendChild(el("span","badge b-forum-"+o.forum,o.forum)); tr.appendChild(f);
-  tr.appendChild(el("td","no",o.no||"—"));
+  const noCell=el("td","no",o.no||"—"); if(o.no)noCell.title=o.no; tr.appendChild(noCell);
   tr.appendChild(el("td","date",o.date||"—"));
   const tt=el("td","title");
   tt.appendChild(el("div","t",o.title||"(untitled order)"));
