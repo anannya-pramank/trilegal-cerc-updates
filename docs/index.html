@@ -240,6 +240,729 @@ const el = (t,c,txt)=>{const e=document.createElement(t); if(c)e.className=c; if
 const j = p => fetch(DATA+p).then(r=>{if(!r.ok)throw new Error(p); return r.json();});
 
 // ---- boot ------------------------------------------------------------------
+Promise.all([j("index.json"), j("taxonomy.json"), j("meta.json").catch(()=>null),
+             j("entities.json").catch(()=>[])])
+  .then(([idx,tax,meta,ents])=>{
+    state.index=idx; state.taxonomy=tax; state.meta=meta; state.entities=ents||[];
+    renderCoverage(); buildFacets(); wire(); render();
+  })
+  .catch(e=>{ $("#view").innerHTML =
+    `<div class="empty"><div class="big">No data yet</div>`+
+    `Run <code>export_atlas.py</code> to publish <code>${DATA}</code>, then reload.</div>`;
+    console.error(e); });
+
+function renderCoverage(){
+  const m=state.meta; if(!m){$("#cov").textContent=""; return;}
+  const pct = m.orders_total? Math.round(100*m.orders_tagged/m.orders_total):0;
+  $("#cov").innerHTML =
+    `<b>${m.orders_total.toLocaleString()}</b> orders · tagged `+
+    `<span class="bar"><i style="width:${pct}%"></i></span> <b>${pct}%</b>`;
+  $("#cov").title = Object.entries(m.coverage||{})
+    .map(([f,c])=>`${f}: ${c.tagged}/${c.total}`).join("  ·  ");
+}
+
+// ---- facets ----------------------------------------------------------------
+// Facets are derived from the index so they reflect exactly what's published.
+function buildFacets(){
+  const forums=new Counter(), pts=new Counter(), appeals=new Counter(), tags=new Counter();
+  for(const o of state.index){
+    forums.add(o.forum); if(o.pt)pts.add(o.pt);
+    if(o.appeal && o.appeal!=="n/a" && o.appeal!=="unknown")appeals.add(o.appeal);
+    (o.tags||[]).forEach(t=>tags.add(t));
+  }
+  const wrap=$("#facets"); wrap.innerHTML="";
+  wrap.appendChild(facetBlock("Forum","forum",forums,v=>v));
+  wrap.appendChild(facetBlock("Appeal status","appeal",appeals,v=>label(v)));
+  wrap.appendChild(facetBlock("Petition type","pt",pts,v=>v));
+  // subject-matter tags: only the subject facet, named via taxonomy, top by count
+  const subj=new Counter();
+  tags.forEach((n,c)=>{ if(isSubjectFacet((state.taxonomy[c]||{}).facet))subj.set(c,n); });
+  wrap.appendChild(facetBlock("Subject matter","tags",subj,c=>(state.taxonomy[c]||{}).name||c,true));
+}
+
+function facetBlock(title,dim,counter,namer,collapsible){
+  const b=el("div","facet");
+  const h=el("h3"); h.appendChild(el("span",null,title));
+  const items=[...counter.entries()].sort((a,b)=>b[1]-a[1]);
+  h.appendChild(el("span",null,String(items.length)));
+  b.appendChild(h);
+  const LIMIT=8; let shown=collapsible?LIMIT:items.length;
+  const listEl=el("div");
+  const paint=()=>{
+    listEl.innerHTML="";
+    items.slice(0,shown).forEach(([val,n])=>{
+      const on=(state.active[dim]||[]).includes(val);
+      const o=el("div","opt"+(on?" on":"")); o.onclick=()=>toggle(dim,val);
+      const bx=el("span","box",on?"✓":""); o.appendChild(bx);
+      o.appendChild(el("span",null,namer(val)));
+      o.appendChild(el("span","n",String(n)));
+      listEl.appendChild(o);
+    });
+    if(collapsible && items.length>LIMIT){
+      const m=el("span","more",shown<items.length?`+${items.length-shown} more`:"show less");
+      m.onclick=()=>{shown=shown<items.length?items.length:LIMIT; paint();};
+      listEl.appendChild(m);
+    }
+  };
+  paint(); b._paint=paint; b.dataset.dim=dim; b.appendChild(listEl);
+  return b;
+}
+
+function toggle(dim,val){
+  const a=state.active[dim]||(state.active[dim]=[]);
+  const i=a.indexOf(val); i<0?a.push(val):a.splice(i,1);
+  if(!a.length)delete state.active[dim];
+  repaintFacets(); render();
+}
+function repaintFacets(){document.querySelectorAll(".facet").forEach(f=>f._paint&&f._paint());}
+
+// ---- filtering -------------------------------------------------------------
+function filtered(){
+  const q=state.q.toLowerCase();
+  return state.index.filter(o=>{
+    if(q){
+      const hay=((o.title||"")+" "+(o.party||"")+" "+(o.no||"")).toLowerCase();
+      if(!hay.includes(q))return false;
+    }
+    for(const[dim,vals] of Object.entries(state.active)){
+      if(dim==="tags"){ if(!vals.every(v=>(o.tags||[]).includes(v)))return false; }
+      else if(!vals.includes(o[dim]))return false;
+    }
+    return true;
+  });
+}
+function sorted(rows){
+  const r=rows.slice();
+  const by={
+    date_desc:(a,b)=>(b.date||"").localeCompare(a.date||""),
+    date_asc:(a,b)=>(a.date||"").localeCompare(b.date||""),
+    forum:(a,b)=>(a.forum).localeCompare(b.forum)||(b.date||"").localeCompare(a.date||""),
+  };
+  return r.sort(by[state.sort]||by.date_desc);
+}
+
+// ---- render ----------------------------------------------------------------
+function render(){
+  ["browse","dashboard","setaside","issues"].forEach(t=>{});
+  if(state.tab==="browse")return renderBrowse();
+  if(state.tab==="dashboard")return renderDashboard();
+  if(state.tab==="setaside")return renderAgg("set_aside.json",renderSetAside);
+  if(state.tab==="issues")return renderAgg("issues.json",renderIssues);
+  if(state.tab==="news")return renderNews();
+}
+
+// resolve a typed query to a registry entity (name/alias match)
+function resolveEntity(q){
+  if(!q||!state.entities)return null;
+  const nq=q.toLowerCase().trim();
+  if(nq.length<2)return null;
+  // exact name/alias first, then startswith
+  let hit=state.entities.find(e=>e.name.toLowerCase()===nq
+    || (e.aliases||[]).some(a=>a.toLowerCase()===nq));
+  if(!hit)hit=state.entities.find(e=>e.name.toLowerCase().includes(nq)
+    || (e.aliases||[]).some(a=>a.toLowerCase().includes(nq)&&nq.length>=3));
+  return hit||null;
+}
+
+function renderBrowse(){
+  const rows=sorted(filtered());
+  const v=$("#view"); v.innerHTML="";
+  // if the search resolves to a known company, offer its dossier
+  const ent=resolveEntity(state.q);
+  if(ent){
+    const banner=el("div");
+    banner.style.cssText="margin:12px 16px;padding:11px 14px;border:1px solid var(--acc-dim);"+
+      "border-radius:6px;background:var(--panel);display:flex;align-items:center;gap:12px;cursor:pointer";
+    banner.onclick=()=>openEntity(ent.id);
+    banner.innerHTML=`<span style="font-family:var(--serif);font-size:15px">${esc(ent.name)}</span>`+
+      `<span class="mtag">${esc(ent.type)}</span>`+
+      `<span class="note" style="margin:0">${ent.n_orders} orders · ${ent.n_news} news</span>`+
+      `<span style="margin-left:auto;color:var(--acc);font-size:12px">Open company page →</span>`;
+    v.appendChild(banner);
+  }
+  const bar=el("div","listbar");
+  bar.appendChild(el("span",null,`${rows.length.toLocaleString()} of ${state.index.length.toLocaleString()}`));
+  const chips=el("div","chips");
+  for(const[dim,vals] of Object.entries(state.active))
+    vals.forEach(val=>{
+      const c=el("span","chip","✕ "+(dim==="tags"?((state.taxonomy[val]||{}).name||val):label(val)));
+      c.onclick=()=>toggle(dim,val); chips.appendChild(c);
+    });
+  bar.appendChild(chips);
+  const sortWrap=el("div","sort");
+  const sel=el("select");
+  [["date_desc","Newest first"],["date_asc","Oldest first"],["forum","By forum"]]
+    .forEach(([v0,t])=>{const o=el("option",null,t); o.value=v0; if(v0===state.sort)o.selected=true; sel.appendChild(o);});
+  sel.onchange=()=>{state.sort=sel.value; renderBrowse();};
+  sortWrap.appendChild(sel); bar.appendChild(sortWrap);
+  v.appendChild(bar);
+
+  if(!rows.length){
+    v.appendChild(Object.assign(el("div","empty"),{innerHTML:
+      `<div class="big">Nothing matches</div>Clear a filter to widen the view.`}));
+    return;
+  }
+  const t=el("table");
+  t.innerHTML="<thead><tr><th>Forum</th><th>Petition no.</th><th>Date</th>"+
+    "<th>Order</th><th>Appeal</th></tr></thead>";
+  const tb=el("tbody");
+  rows.slice(0,400).forEach(o=>tb.appendChild(rowFor(o)));
+  t.appendChild(tb); v.appendChild(t);
+  if(rows.length>400)
+    v.appendChild(Object.assign(el("div","note"),{textContent:
+      `Showing first 400. Narrow with filters to see the rest.`, style:"padding:12px 16px"}));
+}
+
+function rowFor(o){
+  const tr=el("tr"); tr.onclick=()=>openDrawer(o.id,o.forum);
+  const f=el("td"); f.appendChild(el("span","badge b-forum-"+o.forum,o.forum)); tr.appendChild(f);
+  tr.appendChild(el("td","no",o.no||"—"));
+  tr.appendChild(el("td","date",o.date||"—"));
+  const tt=el("td","title");
+  tt.appendChild(el("div","t",o.title||"(untitled order)"));
+  if(o.party)tt.appendChild(el("div","party",o.party));
+  const tl=el("div","tagline");
+  if((o.tags||[]).length){
+    o.tags.slice(0,4).forEach(c=>tl.appendChild(el("span","mtag",(state.taxonomy[c]||{}).name||c)));
+    if(o.tags.length>4)tl.appendChild(el("span","mtag","+"+(o.tags.length-4)));
+  } else tl.appendChild(el("span","untagged","untagged"));
+  tt.appendChild(tl); tr.appendChild(tt);
+  const ap=el("td");
+  if(o.appeal&&o.appeal!=="n/a"&&o.appeal!=="unknown")ap.appendChild(el("span","badge b-"+o.appeal,label(o.appeal)));
+  tr.appendChild(ap);
+  return tr;
+}
+
+// ---- drawer ----------------------------------------------------------------
+function openDrawer(id,forum){
+  const d=$("#drawer"); d.classList.add("open");
+  d.innerHTML=`<div class="loading">Loading order…</div>`;
+  j("orders/"+safe(id)+".json").then(o=>paintDrawer(o))
+    .catch(()=>{d.innerHTML=`<div class="dhead"><button class="dclose" onclick="closeDrawer()">✕</button>`+
+      `<h2>Order detail unavailable</h2></div>`+
+      `<div class="body">This order isn't in the published shard set yet.</div>`;});
+}
+function closeDrawer(){$("#drawer").classList.remove("open");}
+window.closeDrawer=closeDrawer;
+window.openDrawer=openDrawer;
+
+// ---- company / entity page -------------------------------------------------
+function openEntity(eid){
+  const d=$("#drawer"); d.classList.add("open");
+  d.innerHTML=`<div class="loading">Loading company…</div>`;
+  j("entities/"+safe(eid)+".json").then(e=>paintEntity(e))
+    .catch(()=>{d.innerHTML=`<div class="dhead"><button class="dclose" onclick="closeDrawer()">✕</button>`+
+      `<h2>Company page unavailable</h2></div><div class="body">No dossier for this entity yet.</div>`;});
+}
+window.openEntity=openEntity;
+
+function paintEntity(e){
+  const d=$("#drawer");
+  const SRC={mercom:"Mercom",saur:"Saur",energetica:"Energetica",et_energyworld:"ET EnergyWorld",moneycontrol:"Moneycontrol"};
+  let h=`<div class="dhead"><button class="dclose" onclick="closeDrawer()">✕</button>`+
+    `<h2>${esc(e.name)}</h2><div class="meta"><span>${esc(e.type)}</span>`+
+    `<span>${e.n_orders} orders</span><span>${e.n_news} news</span></div></div><div class="body">`;
+
+  // appeal outcome summary (only if any known)
+  const at=e.appeal_tally||{};
+  const atKeys=Object.keys(at).filter(k=>at[k]);
+  if(atKeys.length){
+    h+=`<h4>Appeal outcomes</h4><div style="display:flex;gap:8px;flex-wrap:wrap">`;
+    atKeys.forEach(k=>h+=`<span class="badge b-${k}">${esc(label(k))} ${at[k]}</span>`);
+    h+=`</div>`;
+  }
+
+  // issue mix
+  if((e.issues||[]).length){
+    h+=`<h4>Issues litigated</h4><div class="tagline" style="margin-top:0">`;
+    e.issues.slice(0,10).forEach(i=>h+=`<span class="mtag">${esc(i.name)} · ${i.count}</span>`);
+    h+=`</div>`;
+  }
+
+  // orders
+  h+=`<h4>Matters (${(e.orders||[]).length})</h4>`;
+  (e.orders||[]).slice(0,40).forEach(o=>{
+    const badge=(o.appeal&&o.appeal!=="n/a"&&o.appeal!=="unknown")
+      ?`<span class="badge b-${o.appeal}" style="font-size:8px">${esc(label(o.appeal))}</span>`:"";
+    h+=`<div class="newslink" onclick="openDrawer('${esc(o.id)}','${esc(o.forum)}')" `+
+      `style="padding:5px 0;cursor:pointer;border-bottom:1px solid var(--panel-2)">`+
+      `<span class="badge b-forum-${esc(o.forum)}" style="font-size:8px">${esc(o.forum)}</span> `+
+      `<span style="font-family:var(--mono);font-size:11px;color:var(--acc)">${esc(o.no||o.id)}</span> `+
+      `<span style="font-size:11px;color:var(--mut)">${esc(o.date||"")}</span> ${badge}`+
+      `<div style="font-size:12px;margin-top:2px">${esc((o.title||"").slice(0,70))}</div></div>`;
+  });
+
+  // news
+  if((e.news||[]).length){
+    h+=`<h4>In the news (${e.news.length})</h4>`;
+    e.news.slice(0,25).forEach(n=>{
+      h+=`<div style="padding:5px 0;border-bottom:1px solid var(--panel-2)">`+
+        `<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:12px">${esc(n.title)}</a>`+
+        `<div style="font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:2px">`+
+        `${esc(n.published||"")} · ${esc(SRC[n.source]||n.source)}</div></div>`;
+    });
+  }
+  h+=`</div>`;
+  d.innerHTML=h;
+}
+
+function paintDrawer(o){
+  const d=$("#drawer");
+  const meta=[o.forum,o.petition_no,o.date].filter(Boolean)
+    .map(x=>`<span>${esc(x)}</span>`).join("");
+  let html=`<div class="dhead"><button class="dclose" onclick="closeDrawer()">✕</button>`+
+    `<h2>${esc(o.title||"(untitled order)")}</h2><div class="meta">${meta}</div>`;
+  if(o.party)html+=`<div class="meta" style="margin-top:6px">${esc(o.party)}</div>`;
+  html+=`</div><div class="body">`;
+
+  if(o.summary){html+=`<h4>Digest</h4><div class="summary">${esc(o.summary)}</div>`;}
+
+  const tags=o.tags||[];
+  html+=`<h4>Classification ${tags.length?"":"<span class='untagged'>— not yet tagged</span>"}</h4>`;
+  if(tags.length){
+    for(const t of tags){
+      const conf=t.confidence!=null?Math.round(t.confidence*100)+"%":t.method||"";
+      html+=`<div class="tagrow"><span class="fc">${esc(facetShort(t.facet_of||t.facet))}</span>`+
+        `<span>${esc(t.name||t.code)}</span><span class="conf">${esc(conf)}</span></div>`;
+    }
+  }
+
+  if(o.appeal&&o.appeal.status&&o.appeal.status!=="n/a"&&o.appeal.status!=="unknown"){
+    html+=`<h4>Appeal — ${esc(label(o.appeal.status))}</h4>`;
+    if((o.appeal.chain||[]).length){
+      html+=`<div class="chain">`;
+      o.appeal.chain.forEach(c=>{
+        html+=`<div class="step">APTEL ${esc(c.aptel_id||"")} — ${esc(c.disposition||"pending")}</div>`;
+      });
+      html+=`</div>`;
+    } else if(o.appeal.status==="unappealed"){
+      html+=`<div class="summary">No appeal on record.</div>`;
+    }
+  }
+
+  if(o.url)html+=`<h4>Source</h4><a href="${esc(o.url)}" target="_blank" rel="noopener">Open original PDF ↗</a>`;
+
+  // related news — Tier A (entity, precise) then Tier B (issue, broad)
+  const ent=o.news_entity||[], iss=o.news_issue||[];
+  if(ent.length||iss.length){
+    const SRC={mercom:"Mercom",saur:"Saur",energetica:"Energetica",et_energyworld:"ET EnergyWorld",moneycontrol:"Moneycontrol"};
+    if(ent.length){
+      html+=`<h4>Related news — entity match <span class="untagged">candidates, verify</span></h4>`;
+      ent.forEach(n=>{
+        html+=`<div style="padding:6px 0;border-bottom:1px solid var(--panel-2)">`+
+          `<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:12.5px">${esc(n.title)}</a>`+
+          `<div style="margin-top:3px;font-family:var(--mono);font-size:10px;color:var(--dim)">`+
+          `${esc(n.published||"")} · ${esc(SRC[n.source]||n.source)} · ${esc(n.method)} · ${esc(n.evidence||"")}</div></div>`;
+      });
+    }
+    if(iss.length){
+      html+=`<h4>In the news on this issue</h4>`;
+      iss.forEach(n=>{
+        html+=`<div style="padding:6px 0;border-bottom:1px solid var(--panel-2)">`+
+          `<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:12.5px">${esc(n.title)}</a>`+
+          `<div style="margin-top:3px;font-family:var(--mono);font-size:10px;color:var(--dim)">`+
+          `${esc(n.published||"")} · ${esc(SRC[n.source]||n.source)}</div></div>`;
+      });
+    }
+  }
+  html+=`</div>`;
+  d.innerHTML=html;
+}
+
+// ---- aggregate tabs --------------------------------------------------------
+function renderAgg(file,painter){
+  const v=$("#view"); v.innerHTML=`<div class="loading">Loading…</div>`;
+  j("agg/"+file).then(painter).catch(()=>{
+    v.innerHTML=`<div class="empty"><div class="big">Not computed yet</div>`+
+      `This view needs <code>${file}</code>. Re-run the exporter without <code>--shards-only</code>.</div>`;
+  });
+}
+
+function renderDashboard(){
+  const v=$("#view"); v.innerHTML=`<div class="loading">Loading…</div>`;
+  j("agg/dashboard.json").then(rows=>{
+    const m=state.meta||{}; const max=Math.max(1,...rows.map(r=>(r.CERC||0)+(r.APTEL||0)));
+    let h=`<div class="pad"><div class="cards">`;
+    h+=card("Orders",(m.orders_total||0).toLocaleString());
+    h+=card("CERC",(m.coverage?.CERC?.total||0).toLocaleString(),
+            `${m.coverage?.CERC?.tagged||0} tagged`);
+    h+=card("APTEL",(m.coverage?.APTEL?.total||0).toLocaleString(),
+            `${m.coverage?.APTEL?.tagged||0} tagged`);
+    h+=card("Years",rows.length);
+    h+=`</div><h4 style="font-family:var(--mono);font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em">Orders by year</h4>`;
+    rows.slice().reverse().forEach(r=>{
+      const tot=(r.CERC||0)+(r.APTEL||0);
+      h+=`<div class="yrow"><span class="yr">${r.year}</span>`+
+        `<span class="barc"><i class="c" style="width:${100*(r.CERC||0)/max}%"></i>`+
+        `<i class="a" style="width:${100*(r.APTEL||0)/max}%"></i></span>`+
+        `<span class="tot">${tot}</span></div>`;
+    });
+    h+=`<div class="note">Blue = CERC · amber = APTEL. Built ${esc((m.built_at||"").replace("T"," ").replace("+00:00"," UTC"))}.</div></div>`;
+    v.innerHTML=h;
+  }).catch(()=>{$("#view").innerHTML=aggMissing("dashboard.json");});
+}
+
+function renderSetAside(rows){
+  const v=$("#view");
+  if(!rows.length){v.innerHTML=`<div class="empty"><div class="big">No disturbed orders on record</div>`+
+    `Once the appeal linkage is populated, CERC orders set aside or remanded by APTEL appear here.</div>`; return;}
+  let h=`<div class="pad"><p class="note" style="margin-bottom:16px">CERC orders that APTEL set aside or remanded on appeal. Candidate linkage — verify against the original judgment.</p><table><thead><tr><th>Petition no.</th><th>Date</th><th>Order</th><th>Status</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    h+=`<tr onclick="openDrawer('${esc(r.id)}','CERC')"><td class="no">${esc(r.no||"—")}</td>`+
+      `<td class="date">${esc(r.date||"—")}</td><td class="title"><div class="t">${esc(r.title||"")}</div></td>`+
+      `<td><span class="badge b-${r.status}">${esc(label(r.status))}</span></td></tr>`;
+  });
+  h+=`</tbody></table></div>`; v.innerHTML=h;
+}
+
+function renderIssues(rows){
+  const v=$("#view");
+  if(!rows.length){v.innerHTML=`<div class="empty"><div class="big">No issue tags yet</div>`+
+    `Subject-matter tags populate this as the tagger runs.</div>`; return;}
+  const max=Math.max(1,...rows.map(r=>r.count));
+  let h=`<div class="pad"><p class="note" style="margin-bottom:14px">Subject-matter frequency across tagged orders. Click to browse that issue.</p><div class="ilist">`;
+  rows.forEach(r=>{
+    h+=`<div class="irow" style="cursor:pointer" onclick="jumpIssue('${esc(r.code)}')">`+
+      `<span class="ibar" style="width:${Math.max(6,140*r.count/max)}px"></span>`+
+      `<span class="iname">${esc(r.name)}</span><span class="icount">${r.count}</span></div>`;
+  });
+  h+=`</div></div>`; v.innerHTML=h;
+}
+window.jumpIssue=(code)=>{
+  state.active={tags:[code]}; setTab("browse"); repaintFacets(); render();
+};
+
+// ---- news tab --------------------------------------------------------------
+let _newsCache=null, _newsSource="all";
+function renderNews(){
+  const v=$("#view"); 
+  if(_newsCache){ paintNews(v); return; }
+  v.innerHTML=`<div class="loading">Loading news…</div>`;
+  j("news.json").then(rows=>{_newsCache=rows; paintNews(v);})
+    .catch(()=>{v.innerHTML=`<div class="empty"><div class="big">No news yet</div>`+
+      `Run <code>news_watch.py</code> then <code>tag_news.py</code> to populate the watch.</div>`;});
+}
+function paintNews(v){
+  const rows=_newsCache;
+  const SRC={mercom:"Mercom",saur:"Saur Energy",energetica:"Energetica",
+             et_energyworld:"ET EnergyWorld",moneycontrol:"Moneycontrol"};
+  const counts=new Counter(); rows.forEach(r=>counts.add(r.source));
+  const shown=_newsSource==="all"?rows:rows.filter(r=>r.source===_newsSource);
+  let h=`<div class="pad" style="max-width:820px">`;
+  h+=`<p class="note" style="margin-bottom:14px">Energy-regulation news, auto-tagged to the same subject taxonomy as orders. Items tagged to an issue appear on that issue's orders; precise entity matches appear on the specific order.</p>`;
+  h+=`<div class="chips" style="margin-bottom:16px">`;
+  h+=`<span class="chip${_newsSource==="all"?" on":""}" onclick="setNewsSource('all')">All (${rows.length})</span>`;
+  for(const[s,label] of Object.entries(SRC))
+    if(counts.get(s))h+=`<span class="chip${_newsSource===s?" on":""}" onclick="setNewsSource('${s}')">${label} (${counts.get(s)})</span>`;
+  h+=`</div>`;
+  if(!shown.length)h+=`<div class="empty">No items from this source yet.</div>`;
+  shown.slice(0,200).forEach(n=>{
+    h+=`<div style="padding:11px 0;border-bottom:1px solid var(--panel-2)">`;
+    h+=`<div style="display:flex;gap:10px;align-items:baseline">`;
+    h+=`<span class="date" style="font-family:var(--mono);font-size:11px;color:var(--mut);white-space:nowrap">${esc(n.published||"—")}</span>`;
+    h+=`<a href="${esc(n.url)}" target="_blank" rel="noopener" style="font-size:13.5px;color:var(--fg)">${esc(n.title)}</a></div>`;
+    h+=`<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">`;
+    h+=`<span class="mtag" style="background:var(--acc-dim);color:#cfe1fb">${esc(SRC[n.source]||n.source)}</span>`;
+    (n.tag_names||[]).forEach(t=>h+=`<span class="mtag">${esc(t)}</span>`);
+    if(!(n.tag_names||[]).length)h+=`<span class="untagged">untagged</span>`;
+    if(n.n_links)h+=`<span class="mtag" style="color:var(--warn)">${n.n_links} order match${n.n_links>1?"es":""} ↓</span>`;
+    h+=`</div>`;
+    if((n.links||[]).length){
+      h+=`<div style="margin-top:6px;padding-left:10px;border-left:2px solid var(--line)">`;
+      n.links.forEach(l=>{
+        const strong=(l.score||0)>=0.9;
+        h+=`<div class="newslink" onclick="openDrawer('${esc(l.order_id)}','${esc(l.forum)}')" `+
+          `style="padding:3px 0;cursor:pointer;font-size:12px">`+
+          `<span class="badge b-forum-${esc(l.forum)}" style="font-size:8.5px">${esc(l.forum)}</span> `+
+          `<span style="font-family:var(--mono);font-size:11px;color:var(--acc)">${esc(l.order_no||l.order_id)}</span> `+
+          `<span style="color:var(--mut)">${esc((l.order_title||"").slice(0,54))}</span>`+
+          `<span style="font-family:var(--mono);font-size:9.5px;color:${strong?'var(--ok)':'var(--dim)'};margin-left:6px">`+
+          `${esc(l.method)}·${esc(l.evidence||"")}</span></div>`;
+      });
+      h+=`</div>`;
+    }
+    h+=`</div>`;
+  });
+  h+=`</div>`;
+  v.innerHTML=h;
+}
+window.setNewsSource=(s)=>{_newsSource=s; paintNews($("#view"));};
+
+// ---- misc ------------------------------------------------------------------
+function card(k,v,sub){return `<div class="card"><div class="k">${k}</div>`+
+  `<div class="v">${v}${sub?` <small>${sub}</small>`:""}</div></div>`;}
+function aggMissing(f){return `<div class="empty"><div class="big">Not computed yet</div>Needs <code>${f}</code>.</div>`;}
+
+function wire(){
+  $("#q").addEventListener("input",e=>{state.q=e.target.value; if(state.tab==="browse")renderBrowse();});
+  $("#tabs").addEventListener("click",e=>{const b=e.target.closest("button"); if(b)setTab(b.dataset.tab);});
+  document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
+}
+function setTab(t){
+  state.tab=t;
+  document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.tab===t)));
+  $("#rail").style.display = t==="browse"?"":"none";
+  render();
+}
+
+function label(s){return ({
+  unappealed:"unappealed", affirmed:"affirmed", set_aside:"set aside",
+  remanded:"remanded", appealed_pending:"appeal pending", unknown:"—",
+}[s])||s;}
+function isSubjectFacet(f){f=(f||"").toLowerCase(); return f==="subject"||f.startsWith("facet_1");}
+function facetShort(f){if(!f)return""; f=String(f).toLowerCase();
+  if(f==="subject"||f.startsWith("facet_1"))return"subject";
+  if(f==="instrument"||f.startsWith("facet_2"))return"instrument";
+  if(f==="petition"||f.startsWith("facet_3"))return"pet.type";
+  if(f==="party"||f.startsWith("facet_4"))return"party";
+  if(f==="disposition"||f.startsWith("facet_5"))return"disposition"; return f;}
+function safe(s){return String(s).replace(/[^A-Za-z0-9_.-]/g,"_");}
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+class Counter extends Map{add(k){this.set(k,(this.get(k)||0)+1);}}
+</script>
+</body>
+</html><!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERC / APTEL Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#12161c; --panel:#1a2029; --panel-2:#212934; --line:#2c3644;
+    --fg:#e6ebf1; --mut:#8593a5; --dim:#5d6b7d;
+    --acc:#3b82f6; --acc-dim:#1e3a5f;
+    --ok:#3fb98c; --warn:#e0a458; --bad:#e0685f; --remand:#b98fe0;
+    --serif:"IBM Plex Serif",Georgia,serif;
+    --sans:"IBM Plex Sans",system-ui,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--ink); color:var(--fg); font-family:var(--sans);
+    font-size:14px; line-height:1.45; display:flex; flex-direction:column;
+    height:100vh; overflow:hidden;
+  }
+  a{color:var(--acc); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* header ----------------------------------------------------------------*/
+  header{
+    display:flex; align-items:baseline; gap:16px; padding:12px 18px;
+    border-bottom:1px solid var(--line); background:var(--panel); flex:none;
+  }
+  header h1{
+    font-family:var(--serif); font-weight:600; font-size:18px; margin:0;
+    letter-spacing:.2px;
+  }
+  header h1 .sep{color:var(--acc); font-weight:500}
+  header .tag{
+    font-family:var(--mono); font-size:10px; color:var(--dim);
+    border:1px solid var(--line); border-radius:3px; padding:1px 6px;
+    text-transform:uppercase; letter-spacing:.08em;
+  }
+  header .cov{margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--mut)}
+  header .cov b{color:var(--fg); font-weight:500}
+  header .cov .bar{
+    display:inline-block; width:80px; height:6px; border-radius:3px;
+    background:var(--panel-2); vertical-align:middle; margin:0 6px; overflow:hidden;
+    border:1px solid var(--line);
+  }
+  header .cov .bar > i{display:block; height:100%; background:var(--acc)}
+
+  /* tabs ------------------------------------------------------------------*/
+  nav.tabs{
+    display:flex; gap:2px; padding:0 12px; background:var(--panel);
+    border-bottom:1px solid var(--line); flex:none;
+  }
+  nav.tabs button{
+    font-family:var(--mono); font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; background:none; border:none; color:var(--mut);
+    padding:9px 14px; cursor:pointer; border-bottom:2px solid transparent;
+  }
+  nav.tabs button:hover{color:var(--fg)}
+  nav.tabs button[aria-selected=true]{color:var(--fg); border-bottom-color:var(--acc)}
+
+  main{flex:1; display:flex; min-height:0}
+
+  /* rail ------------------------------------------------------------------*/
+  aside{
+    width:270px; flex:none; border-right:1px solid var(--line);
+    background:var(--panel); overflow-y:auto; padding:14px 0;
+  }
+  aside .search{padding:0 14px 12px}
+  aside input[type=search]{
+    width:100%; background:var(--ink); border:1px solid var(--line); color:var(--fg);
+    font-family:var(--mono); font-size:12px; padding:7px 9px; border-radius:4px;
+  }
+  aside input[type=search]:focus{outline:none; border-color:var(--acc)}
+  .facet{border-top:1px solid var(--line); padding:10px 14px}
+  .facet > h3{
+    font-family:var(--mono); font-size:10px; text-transform:uppercase;
+    letter-spacing:.1em; color:var(--dim); margin:0 0 8px;
+    display:flex; justify-content:space-between; cursor:pointer;
+  }
+  .facet .opt{
+    display:flex; align-items:center; gap:7px; padding:3px 0; cursor:pointer;
+    color:var(--mut); font-size:12.5px;
+  }
+  .facet .opt:hover{color:var(--fg)}
+  .facet .opt.on{color:var(--fg)}
+  .facet .opt .box{
+    width:13px; height:13px; border:1px solid var(--line); border-radius:3px; flex:none;
+    display:grid; place-items:center; font-size:9px; color:var(--ink);
+  }
+  .facet .opt.on .box{background:var(--acc); border-color:var(--acc)}
+  .facet .opt .n{margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--dim)}
+  .facet .more{font-size:11px; color:var(--acc); cursor:pointer; margin-top:5px; display:inline-block}
+
+  /* content ---------------------------------------------------------------*/
+  section.view{flex:1; overflow-y:auto; min-width:0}
+  .listbar{
+    display:flex; align-items:center; gap:14px; padding:9px 16px;
+    border-bottom:1px solid var(--line); position:sticky; top:0;
+    background:var(--ink); z-index:2; font-family:var(--mono); font-size:11px; color:var(--mut);
+  }
+  .listbar .chips{display:flex; gap:6px; flex-wrap:wrap}
+  .chip{
+    background:var(--acc-dim); color:#cfe1fb; border:1px solid var(--acc);
+    border-radius:3px; padding:1px 7px; font-size:10px; cursor:pointer;
+  }
+  .chip:hover{background:var(--acc); color:#fff}
+  .chip.on{background:var(--acc); color:#fff}
+  .newslink:hover{background:var(--panel-2)}
+  .listbar .sort{margin-left:auto}
+  .listbar select{
+    background:var(--panel); color:var(--fg); border:1px solid var(--line);
+    font-family:var(--mono); font-size:11px; padding:3px 6px; border-radius:3px;
+  }
+
+  table{width:100%; border-collapse:collapse}
+  thead th{
+    font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--dim); text-align:left; padding:8px 16px; border-bottom:1px solid var(--line);
+    position:sticky; top:37px; background:var(--ink);
+  }
+  tbody tr{border-bottom:1px solid var(--panel-2); cursor:pointer}
+  tbody tr:hover{background:var(--panel)}
+  tbody td{padding:9px 16px; vertical-align:top}
+  td.no{font-family:var(--mono); font-size:12px; color:var(--acc); white-space:nowrap}
+  td.date{font-family:var(--mono); font-size:12px; color:var(--mut); white-space:nowrap}
+  td.title{max-width:0; width:60%}
+  td.title .t{color:var(--fg); overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+  td.title .party{color:var(--dim); font-size:11.5px; margin-top:2px}
+  .badge{
+    font-family:var(--mono); font-size:9px; text-transform:uppercase; letter-spacing:.05em;
+    padding:1px 6px; border-radius:3px; border:1px solid; white-space:nowrap;
+  }
+  .b-forum-CERC{color:var(--acc); border-color:var(--acc-dim)}
+  .b-forum-APTEL{color:var(--warn); border-color:#5a4a2e}
+  .b-unappealed{color:var(--dim); border-color:var(--line)}
+  .b-affirmed{color:var(--ok); border-color:#2a4a3c}
+  .b-set_aside{color:var(--bad); border-color:#5a2e2e}
+  .b-remanded{color:var(--remand); border-color:#43315a}
+  .b-appealed_pending{color:var(--warn); border-color:#5a4a2e}
+  .tagline{display:flex; gap:4px; flex-wrap:wrap; margin-top:5px}
+  .mtag{
+    font-family:var(--mono); font-size:9.5px; color:var(--mut);
+    background:var(--panel-2); border-radius:3px; padding:1px 5px;
+  }
+  .untagged{font-family:var(--mono); font-size:9.5px; color:var(--dim); font-style:italic}
+
+  /* detail drawer ---------------------------------------------------------*/
+  .drawer{
+    position:fixed; top:0; right:0; height:100%; width:min(560px,92vw);
+    background:var(--panel); border-left:1px solid var(--line); z-index:20;
+    transform:translateX(100%); transition:transform .18s ease; overflow-y:auto;
+    box-shadow:-20px 0 40px rgba(0,0,0,.4);
+  }
+  .drawer.open{transform:translateX(0)}
+  .drawer .dhead{padding:16px 20px; border-bottom:1px solid var(--line)}
+  .drawer .dclose{float:right; background:none; border:none; color:var(--mut); font-size:20px; cursor:pointer; line-height:1}
+  .drawer h2{font-family:var(--serif); font-size:16px; margin:0 0 6px; padding-right:24px}
+  .drawer .meta{font-family:var(--mono); font-size:11px; color:var(--mut); display:flex; gap:12px; flex-wrap:wrap}
+  .drawer .body{padding:16px 20px}
+  .drawer .body h4{
+    font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.09em;
+    color:var(--dim); margin:18px 0 8px; border-bottom:1px solid var(--line); padding-bottom:5px;
+  }
+  .drawer .summary{color:var(--fg); font-size:13px; line-height:1.55}
+  .tagrow{display:flex; align-items:center; gap:8px; padding:4px 0; font-size:12.5px}
+  .tagrow .fc{font-family:var(--mono); font-size:9px; color:var(--dim); width:64px; flex:none; text-transform:uppercase}
+  .tagrow .conf{margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--dim)}
+  .chain{font-family:var(--mono); font-size:12px}
+  .chain .step{padding:5px 0 5px 16px; border-left:2px solid var(--line); position:relative}
+  .chain .step::before{content:""; position:absolute; left:-5px; top:10px; width:8px; height:8px; border-radius:50%; background:var(--acc)}
+
+  /* dashboard / aggregate views ------------------------------------------*/
+  .pad{padding:20px 24px; max-width:900px}
+  .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:24px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px 16px}
+  .card .k{font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim)}
+  .card .v{font-family:var(--serif); font-size:28px; margin-top:4px}
+  .card .v small{font-size:13px; color:var(--mut); font-family:var(--mono)}
+  .yrow{display:flex; align-items:center; gap:10px; padding:4px 0; font-family:var(--mono); font-size:11px}
+  .yrow .yr{width:44px; color:var(--mut)}
+  .yrow .barc{flex:1; display:flex; height:16px; border-radius:3px; overflow:hidden; background:var(--panel-2)}
+  .yrow .barc i{display:block; height:100%}
+  .yrow .barc .c{background:var(--acc)}
+  .yrow .barc .a{background:var(--warn)}
+  .yrow .tot{width:56px; text-align:right; color:var(--dim)}
+  .ilist .irow{display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--panel-2)}
+  .ilist .ibar{height:8px; background:var(--acc); border-radius:2px; flex:none}
+  .ilist .iname{font-size:12.5px}
+  .ilist .icount{margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--mut)}
+
+  .empty{padding:60px 24px; text-align:center; color:var(--mut)}
+  .empty .big{font-family:var(--serif); font-size:20px; color:var(--fg); margin-bottom:8px}
+  .loading{padding:40px; text-align:center; color:var(--dim); font-family:var(--mono); font-size:12px}
+  .note{font-size:11px; color:var(--dim); font-style:italic; margin-top:6px}
+
+  @media(max-width:760px){
+    aside{position:fixed; z-index:15; height:100%; transform:translateX(-100%); transition:transform .18s}
+    aside.open{transform:translateX(0)}
+    td.title{width:auto}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>CERC <span class="sep">/</span> APTEL <span class="sep">·</span> Atlas</h1>
+  <span class="tag">electricity regulation</span>
+  <span class="cov" id="cov">loading…</span>
+</header>
+<nav class="tabs" id="tabs">
+  <button data-tab="browse" aria-selected="true">Browse</button>
+  <button data-tab="dashboard" aria-selected="false">Overview</button>
+  <button data-tab="setaside" aria-selected="false">Set-aside tracker</button>
+  <button data-tab="issues" aria-selected="false">Issues</button>
+  <button data-tab="news" aria-selected="false">News</button>
+</nav>
+<main>
+  <aside id="rail">
+    <div class="search"><input type="search" id="q" placeholder="filter title / party / no."></div>
+    <div id="facets"></div>
+  </aside>
+  <section class="view" id="view"><div class="loading">Loading corpus…</div></section>
+</main>
+<div class="drawer" id="drawer"></div>
+
+<script>
+const DATA = "data/";
+const state = {
+  index:[], taxonomy:{}, meta:null,
+  q:"", active:{}, sort:"date_desc", tab:"browse",
+};
+
+const $ = (s,r=document)=>r.querySelector(s);
+const el = (t,c,txt)=>{const e=document.createElement(t); if(c)e.className=c; if(txt!=null)e.textContent=txt; return e;};
+const j = p => fetch(DATA+p).then(r=>{if(!r.ok)throw new Error(p); return r.json();});
+
+// ---- boot ------------------------------------------------------------------
 Promise.all([j("index.json"), j("taxonomy.json"), j("meta.json").catch(()=>null)])
   .then(([idx,tax,meta])=>{
     state.index=idx; state.taxonomy=tax; state.meta=meta;
