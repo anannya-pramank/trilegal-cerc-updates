@@ -1,0 +1,138 @@
+# entities.yaml — canonical entity registry for the company/entity view.
+#
+# Each entry is ONE distinct legal entity. Surface forms in orders and news
+# ("Adani Power Ltd", "Adani Power Limited", "M/s Adani Power") resolve to the
+# same canonical entity; DIFFERENT Adani companies stay separate (Adani Power !=
+# Adani Green != Adani Transmission), which is what matters for a law firm.
+#
+# Matching (see entity_resolver.py):
+#   * `aliases`  — case-insensitive normalized substring match (suffixes like
+#                  Ltd/Limited stripped before compare). Order matters: LONGER,
+#                  more-specific aliases are tried first so "Adani Green" wins
+#                  over a bare "Adani" catch.
+#   * `patterns` — optional regexes for tricky forms.
+#   * `exclude`  — normalized substrings that must NOT be present (prevents a
+#                  generic alias from stealing a more specific entity's mentions).
+#
+# A query in the search bar resolves the same way, so typing "adani power"
+# opens that entity's dossier.
+#
+# type: helps the party-role facet (generator / transco / discom / re / financier).
+# Extend freely — add an entity, add aliases as you see misses in real data.
+
+entities:
+  - id: adani_power
+    name: Adani Power
+    type: generator
+    aliases: ["adani power", "adani power maharashtra", "adani power rajasthan",
+              "adani power mundra"]
+  - id: adani_green
+    name: Adani Green Energy
+    type: re
+    aliases: ["adani green", "adani green energy", "agel"]
+  - id: adani_transmission
+    name: Adani Transmission / Energy Solutions
+    type: transco
+    aliases: ["adani transmission", "adani energy solutions", "aesl",
+              "adani electricity"]
+  - id: adani_generic
+    name: Adani (group, unresolved)
+    type: group
+    # only matches a bare "adani" that DIDN'T resolve to a specific entity above
+    aliases: ["adani"]
+    exclude: ["power", "green", "transmission", "energy solutions", "electricity"]
+
+  - id: ntpc
+    name: NTPC
+    type: generator
+    aliases: ["ntpc", "national thermal power"]
+    exclude: ["renewable"]           # NTPC Renewable is arguably distinct; split if needed
+  - id: ntpc_renewable
+    name: NTPC Renewable Energy
+    type: re
+    aliases: ["ntpc renewable", "ntpc green"]
+  - id: nhpc
+    name: NHPC
+    type: generator
+    aliases: ["nhpc", "national hydroelectric"]
+  - id: sjvn
+    name: SJVN
+    type: generator
+    aliases: ["sjvn", "satluj jal vidyut"]
+  - id: dvc
+    name: Damodar Valley Corporation
+    type: generator
+    aliases: ["damodar valley", "dvc"]
+
+  - id: pgcil
+    name: Power Grid Corporation
+    type: transco
+    aliases: ["power grid", "pgcil", "powergrid", "power grid corporation"]
+
+  - id: tata_power
+    name: Tata Power
+    type: generator
+    aliases: ["tata power", "tata power delhi", "tpddl", "tata power trading"]
+  - id: torrent
+    name: Torrent Power
+    type: discom
+    aliases: ["torrent power"]
+  - id: jsw
+    name: JSW Energy
+    type: generator
+    aliases: ["jsw energy", "jsw"]
+  - id: reliance
+    name: Reliance Power / Infra
+    type: generator
+    aliases: ["reliance power", "reliance infrastructure", "rinfra"]
+  - id: renew
+    name: ReNew Power
+    type: re
+    aliases: ["renew power", "renew", "renew wind", "renew solar"]
+  - id: greenko
+    name: Greenko
+    type: re
+    aliases: ["greenko"]
+  - id: azure
+    name: Azure Power
+    type: re
+    aliases: ["azure power"]
+  - id: acme
+    name: ACME Solar
+    type: re
+    aliases: ["acme solar", "acme"]
+  - id: avaada
+    name: Avaada
+    type: re
+    aliases: ["avaada"]
+  - id: sembcorp
+    name: Sembcorp
+    type: re
+    aliases: ["sembcorp"]
+  - id: vedanta
+    name: Vedanta / Sterlite
+    type: generator
+    aliases: ["vedanta", "sterlite power", "sterlite"]
+
+  - id: bses_rajdhani
+    name: BSES Rajdhani Power
+    type: discom
+    aliases: ["bses rajdhani", "brpl"]
+  - id: bses_yamuna
+    name: BSES Yamuna Power
+    type: discom
+    aliases: ["bses yamuna", "bypl"]
+  - id: cesc
+    name: CESC
+    type: discom
+    aliases: ["cesc"]
+  - id: gridco
+    name: GRIDCO
+    type: discom
+    aliases: ["gridco"]
+
+  # central agencies / regulators frequently named as respondents
+  - id: psp_grid_india
+    name: Grid-India (POSOCO)
+    type: agency
+    aliases: ["grid india", "grid-india", "posoco", "power system operation"]
